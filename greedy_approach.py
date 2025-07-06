@@ -10,6 +10,7 @@ from collections import defaultdict
 import heapq
 import json
 from datetime import datetime, timedelta
+import pickle  # ADDED: For data collection
 
 class OrderPriority(Enum):
     LOW = 1
@@ -62,6 +63,9 @@ class Drone:
     route: List[Tuple[float, float]] = field(default_factory=list)
     total_distance: float = 0.0
     target_depot_id: Optional[int] = None  # Depot the drone is heading to
+    # ADDED: For improved visualization
+    full_route: List[Tuple[float, float]] = field(default_factory=list)  # Complete planned route
+    route_progress: float = 0.0  # Progress along current segment (0-1)
 
 class RealWorldDataGenerator:
     """Generate realistic datasets based on actual geographic regions"""
@@ -96,9 +100,9 @@ class RealWorldDataGenerator:
         
         # Scale factors based on instance size
         size_params = {
-            'small': {'depots': 2, 'drones_per_depot': 1, 'orders': 15, 'area_scale': 0.3},
-            'medium': {'depots': 3, 'drones_per_depot': 2, 'orders': 35, 'area_scale': 0.6},
-            'large': {'depots': 5, 'drones_per_depot': 3, 'orders': 60, 'area_scale': 1.0}
+            'small': {'depots': 5, 'drones_per_depot': 1, 'orders': 150, 'area_scale': 0.3},
+            'medium': {'depots': 10, 'drones_per_depot': 1, 'orders': 350, 'area_scale': 0.6},
+            'large': {'depots': 15, 'drones_per_depot': 1, 'orders': 600, 'area_scale': 1.0}
         }
         
         params = size_params[size]
@@ -210,6 +214,10 @@ class MultiDepotDroneRoutingOptimizer:
         self.completed_orders = []
         self.current_time = 0.0
         
+        # ADDED: Data collection for GNN training
+        self.training_data = []
+        self.assignment_history = []
+        
         # Initialize drones
         self._initialize_drones()
         
@@ -304,6 +312,88 @@ class MultiDepotDroneRoutingOptimizer:
         
         return True
     
+    # ADDED: Data collection method for GNN training
+    def collect_training_data(self, order: Order, available_drones: List[Drone], chosen_drone: Drone, chosen_depot: int):
+        """Collect training data for GNN model"""
+        # Create state representation
+        state_features = {
+            'order': {
+                'pickup_location': order.pickup_location,
+                'delivery_location': order.delivery_location,
+                'priority': order.priority.value,
+                'arrival_time': order.arrival_time,
+                'deadline': order.deadline,
+                'weight': order.weight,
+                'urgency': max(0, order.deadline - self.current_time)
+            },
+            'drones': [],
+            'depots': [],
+            'current_time': self.current_time
+        }
+        
+        # Add drone features
+        for drone in self.drones:
+            drone_features = {
+                'id': drone.id,
+                'depot_id': drone.depot_id,
+                'location': drone.location,
+                'status': drone.status.value,
+                'battery_level': drone.current_battery / drone.battery_capacity,
+                'available': drone.status == DroneStatus.IDLE,
+                'distance_to_pickup': self.distance(drone.location, order.pickup_location),
+                'can_complete': self.can_complete_order(drone, order)
+            }
+            state_features['drones'].append(drone_features)
+        
+        # Add depot features
+        for depot in self.depots:
+            depot_features = {
+                'id': depot.id,
+                'location': depot.location,
+                'capacity': depot.capacity,
+                'available_drones': len([d for d in self.drones if d.depot_id == depot.id and d.status == DroneStatus.IDLE]),
+                'distance_to_delivery': self.distance(depot.location, order.delivery_location)
+            }
+            state_features['depots'].append(depot_features)
+        
+        # Record the assignment decision
+        assignment_data = {
+            'state': state_features,
+            'action': {
+                'chosen_drone_id': chosen_drone.id,
+                'chosen_depot_id': chosen_depot
+            },
+            'reward': self.calculate_assignment_reward(order, chosen_drone, chosen_depot)
+        }
+        
+        self.training_data.append(assignment_data)
+        
+        # Also keep a simpler assignment history
+        self.assignment_history.append({
+            'timestamp': self.current_time,
+            'order_id': order.id,
+            'drone_id': chosen_drone.id,
+            'start_depot': chosen_drone.depot_id,
+            'end_depot': chosen_depot,
+            'estimated_time': self.estimate_delivery_time(chosen_drone, order)[0]
+        })
+    
+    # ADDED: Reward calculation for training data
+    def calculate_assignment_reward(self, order: Order, drone: Drone, end_depot: int) -> float:
+        """Calculate reward for the assignment decision"""
+        estimated_time, _ = self.estimate_delivery_time(drone, order)
+        
+        # Positive reward components
+        priority_bonus = (5 - order.priority.value) * 10  # Higher priority = higher bonus
+        urgency_bonus = max(0, order.deadline - self.current_time - estimated_time) * 0.1
+        
+        # Negative reward components
+        time_penalty = estimated_time
+        battery_efficiency = (drone.current_battery / drone.battery_capacity) * 5
+        
+        total_reward = priority_bonus + urgency_bonus + battery_efficiency - time_penalty
+        return total_reward
+    
     def assign_orders_greedy(self):
         """Greedy assignment strategy with priority consideration and cross-depot optimization"""
         assignments = []
@@ -315,6 +405,9 @@ class MultiDepotDroneRoutingOptimizer:
             best_drone = None
             best_score = float('inf')
             best_end_depot = None
+            
+            # ADDED: Collect available drones for data collection
+            available_drones = [drone for drone in self.drones if self.can_complete_order(drone, order)]
             
             for drone in self.drones:
                 if not self.can_complete_order(drone, order):
@@ -352,16 +445,19 @@ class MultiDepotDroneRoutingOptimizer:
                 order.end_depot_id = best_end_depot  # Store the optimal end depot
                 assignments.append((best_drone, order))
                 self.pending_orders.remove(order)
+                
+                # ADDED: Collect training data for this assignment
+                self.collect_training_data(order, available_drones, best_drone, best_end_depot)
         
         return assignments
     
     def update_drone_positions(self, dt: float):
-        """Update drone positions and status"""
+        """Update drone positions and status with smoother animation"""
         for drone in self.drones:
             if drone.status == DroneStatus.IDLE or not drone.route:
                 continue
             
-            # Move drone along route
+            # MODIFIED: Smoother movement animation
             if drone.route:
                 target = drone.route[0]
                 distance_to_target = self.distance(drone.location, target)
@@ -372,12 +468,17 @@ class MultiDepotDroneRoutingOptimizer:
                     drone.location = target
                     drone.route.pop(0)
                     drone.total_distance += distance_to_target
+                    drone.route_progress = 0.0  # Reset progress for next segment
                     
                     # Update status based on current objective
                     if drone.status == DroneStatus.FLYING_TO_PICKUP and drone.current_order:
                         if drone.location == drone.current_order.pickup_location:
                             drone.status = DroneStatus.FLYING_TO_DELIVERY
                             drone.route = [drone.current_order.delivery_location]
+                            # ADDED: Update full route for visualization
+                            if hasattr(drone.current_order, 'end_depot_id') and drone.current_order.end_depot_id is not None:
+                                end_depot = next(d for d in self.depots if d.id == drone.current_order.end_depot_id)
+                                drone.full_route = [drone.current_order.delivery_location, end_depot.location]
                             drone.current_order.pickup_time = self.current_time
                     
                     elif drone.status == DroneStatus.FLYING_TO_DELIVERY and drone.current_order:
@@ -396,6 +497,7 @@ class MultiDepotDroneRoutingOptimizer:
                                                key=lambda d: self.distance(drone.location, d.location))
                             
                             drone.route = [end_depot.location]
+                            drone.full_route = [end_depot.location]  # ADDED: Update full route
                             drone.status = DroneStatus.RETURNING_TO_DEPOT
                             drone.target_depot_id = end_depot.id  # Track target depot
                             drone.current_order = None
@@ -404,6 +506,7 @@ class MultiDepotDroneRoutingOptimizer:
                         # Arrived at target depot (may be different from original depot)
                         drone.status = DroneStatus.IDLE
                         drone.current_battery = drone.battery_capacity  # Instant recharge for simulation
+                        drone.full_route = []  # ADDED: Clear full route
                         
                         # Update drone's depot assignment if it ended at a different depot
                         if hasattr(drone, 'target_depot_id') and drone.target_depot_id is not None:
@@ -422,7 +525,7 @@ class MultiDepotDroneRoutingOptimizer:
                             drone.target_depot_id = None
                 
                 else:
-                    # Move towards target
+                    # MODIFIED: Smoother movement with progress tracking
                     direction = ((target[0] - drone.location[0]) / distance_to_target,
                                (target[1] - drone.location[1]) / distance_to_target)
                     
@@ -430,13 +533,27 @@ class MultiDepotDroneRoutingOptimizer:
                     new_y = drone.location[1] + direction[1] * move_distance
                     drone.location = (new_x, new_y)
                     drone.total_distance += move_distance
+                    
+                    # ADDED: Update route progress for smoother visualization
+                    drone.route_progress = min(1.0, drone.route_progress + move_distance / distance_to_target)
     
     def execute_assignments(self, assignments: List[Tuple[Drone, Order]]):
-        """Execute drone-order assignments"""
+        """Execute drone-order assignments with full route planning"""
         for drone, order in assignments:
             drone.current_order = order
             drone.status = DroneStatus.FLYING_TO_PICKUP
             drone.route = [order.pickup_location]
+            
+            # ADDED: Plan full route for visualization
+            if hasattr(order, 'end_depot_id') and order.end_depot_id is not None:
+                end_depot = next(d for d in self.depots if d.id == order.end_depot_id)
+                drone.full_route = [order.pickup_location, order.delivery_location, end_depot.location]
+            else:
+                # Fallback: find nearest depot
+                end_depot = min(self.depots, key=lambda d: self.distance(order.delivery_location, d.location))
+                drone.full_route = [order.pickup_location, order.delivery_location, end_depot.location]
+            
+            drone.route_progress = 0.0
     
     def step(self, dt: float, new_orders: List[Order] = None):
         """Execute one simulation step"""
@@ -474,9 +591,21 @@ class MultiDepotDroneRoutingOptimizer:
             self.metrics['orders_completed_on_time'] = on_time_orders
             
             self.metrics['total_orders_processed'] = len(self.completed_orders) + len(self.pending_orders)
+    
+    # ADDED: Method to save training data
+    def save_training_data(self, filename: str = "drone_routing_training_data.pkl"):
+        """Save collected training data to file"""
+        with open(filename, 'wb') as f:
+            pickle.dump({
+                'training_data': self.training_data,
+                'assignment_history': self.assignment_history,
+                'depots': [(d.id, d.location, d.capacity) for d in self.depots],
+                'drone_specs': self.drone_specs
+            }, f)
+        print(f"Training data saved to {filename} ({len(self.training_data)} samples)")
 
 class DroneRoutingVisualizer:
-    """Real-time visualization of the drone routing system"""
+    """Real-time visualization of the drone routing system with improved animations"""
     
     def __init__(self, optimizer: MultiDepotDroneRoutingOptimizer, bounds: Tuple[Tuple[float, float], Tuple[float, float]]):
         self.optimizer = optimizer
@@ -516,7 +645,7 @@ class DroneRoutingVisualizer:
         self.avg_delivery_time_data = []
         
     def update_visualization(self, frame):
-        """Update visualization for animation"""
+        """Update visualization for animation with improved route display"""
         self.ax_main.clear()
         
         # Plot setup
@@ -543,20 +672,80 @@ class DroneRoutingVisualizer:
                                          facecolor=self.depot_colors[i], alpha=0.7),
                                 zorder=11)
         
-        # Plot drones
+        # MODIFIED: Enhanced drone visualization with full route display
         for drone in self.optimizer.drones:
             color = self.depot_colors[drone.depot_id]
-            marker = 'o' if drone.status == DroneStatus.IDLE else '^'
-            alpha = 0.5 if drone.status == DroneStatus.IDLE else 1.0
             
+            # ADDED: Different markers based on status for better visibility
+            if drone.status == DroneStatus.IDLE:
+                marker = 'o'
+                alpha = 0.6
+                size = 80
+            elif drone.status == DroneStatus.FLYING_TO_PICKUP:
+                marker = '^'
+                alpha = 1.0
+                size = 120
+            elif drone.status == DroneStatus.FLYING_TO_DELIVERY:
+                marker = '>'
+                alpha = 1.0
+                size = 120
+            else:  # RETURNING_TO_DEPOT
+                marker = 'v'
+                alpha = 0.8
+                size = 100
+            
+            # Plot drone with enhanced triangle marker
             self.ax_main.scatter(drone.location[0], drone.location[1], 
-                               c=[color], s=100, marker=marker, alpha=alpha, edgecolors='black')
+                               c=[color], s=size, marker=marker, alpha=alpha, 
+                               edgecolors='black', linewidth=2, zorder=8)
             
-            # Plot drone routes
-            if drone.route:
-                route_x = [drone.location[0]] + [pos[0] for pos in drone.route]
-                route_y = [drone.location[1]] + [pos[1] for pos in drone.route]
-                self.ax_main.plot(route_x, route_y, color=color, alpha=0.6, linestyle='--')
+            # ADDED: Plot full planned route with arrows for active drones
+            if drone.full_route and drone.status != DroneStatus.IDLE:
+                # Create complete route including current position
+                complete_route = [drone.location] + drone.full_route
+                route_x = [pos[0] for pos in complete_route]
+                route_y = [pos[1] for pos in complete_route]
+                
+                # Plot route line with gradient effect
+                self.ax_main.plot(route_x, route_y, color=color, alpha=0.7, 
+                                linestyle='-', linewidth=3, zorder=4)
+                
+                # ADDED: Add arrows along the route to show direction
+                for i in range(len(complete_route) - 1):
+                    start = complete_route[i]
+                    end = complete_route[i + 1]
+                    
+                    # Calculate arrow position (midpoint)
+                    arrow_x = (start[0] + end[0]) / 2
+                    arrow_y = (start[1] + end[1]) / 2
+                    
+                    # Calculate arrow direction
+                    dx = end[0] - start[0]
+                    dy = end[1] - start[1]
+                    
+                    # Add directional arrow
+                    self.ax_main.annotate('', xy=(arrow_x + dx*0.1, arrow_y + dy*0.1),
+                                        xytext=(arrow_x - dx*0.1, arrow_y - dy*0.1),
+                                        arrowprops=dict(arrowstyle='->', color=color, 
+                                                      lw=2, alpha=0.8), zorder=5)
+            
+            # ADDED: Current route segment for immediate target
+            elif drone.route and drone.status != DroneStatus.IDLE:
+                target = drone.route[0]
+                self.ax_main.plot([drone.location[0], target[0]], 
+                                [drone.location[1], target[1]], 
+                                color=color, alpha=0.6, linestyle='--', linewidth=2)
+                
+                # Add arrow to immediate target
+                mid_x = (drone.location[0] + target[0]) / 2
+                mid_y = (drone.location[1] + target[1]) / 2
+                dx = target[0] - drone.location[0]
+                dy = target[1] - drone.location[1]
+                
+                self.ax_main.annotate('', xy=(mid_x + dx*0.1, mid_y + dy*0.1),
+                                    xytext=(mid_x - dx*0.1, mid_y - dy*0.1),
+                                    arrowprops=dict(arrowstyle='->', color=color, 
+                                                  lw=1.5, alpha=0.7))
         
         # Plot pending orders with enhanced P/D visualization
         for order in self.optimizer.pending_orders:
@@ -582,11 +771,22 @@ class DroneRoutingVisualizer:
                                 ha='center', va='center', fontweight='bold', 
                                 fontsize=9, color='white', zorder=6)
             
-            # Connection line with priority color
+            # Connection line with priority color and arrow
             self.ax_main.plot([order.pickup_location[0], order.delivery_location[0]],
                             [order.pickup_location[1], order.delivery_location[1]],
                             color=priority_color, alpha=0.5, linestyle='--', linewidth=2,
                             zorder=2)
+            
+            # ADDED: Arrow showing pickup to delivery direction
+            mid_x = (order.pickup_location[0] + order.delivery_location[0]) / 2
+            mid_y = (order.pickup_location[1] + order.delivery_location[1]) / 2
+            dx = order.delivery_location[0] - order.pickup_location[0]
+            dy = order.delivery_location[1] - order.pickup_location[1]
+            
+            self.ax_main.annotate('', xy=(mid_x + dx*0.1, mid_y + dy*0.1),
+                                xytext=(mid_x - dx*0.1, mid_y - dy*0.1),
+                                arrowprops=dict(arrowstyle='->', color=priority_color, 
+                                              lw=1.5, alpha=0.6))
         
         # Plot completed orders with enhanced visualization
         for order in self.optimizer.completed_orders[-20:]:  # Show last 20 completed
@@ -639,13 +839,13 @@ class DroneRoutingVisualizer:
             legend_elements.append(plt.Line2D([0], [0], linestyle='-', color=color, 
                                             linewidth=4, label=f'  {symbol} {priority.name}'))
         
-        # Drone status legend
+        # MODIFIED: Enhanced drone status legend with new markers
         legend_elements.append(plt.Line2D([0], [0], linestyle='-', color='gray', 
                                         label='🚁 Drone Status:', linewidth=0))
         drone_status_legend = [
             ('⭕ Idle', 'o', 0.6),
             ('▲ To Pickup', '^', 1.0),
-            ('⬛ To Delivery', 's', 1.0),
+            ('▶ To Delivery', '>', 1.0),
             ('▼ Returning', 'v', 0.8),
         ]
         
@@ -654,8 +854,12 @@ class DroneRoutingVisualizer:
                                             markerfacecolor='gray', markersize=8, 
                                             label=f'  {label}', alpha=alpha))
         
-        legend_elements.append(plt.Line2D([0], [0], linestyle='--', color='gray', 
-                                        linewidth=2, label='  ➤ Flight Route'))
+        legend_elements.extend([
+            plt.Line2D([0], [0], linestyle='-', color='gray', 
+                      linewidth=3, label='  ➤ Planned Route'),
+            plt.Line2D([0], [0], linestyle='--', color='gray', 
+                      linewidth=2, label='  ➤ Current Target')
+        ])
         
         self.ax_main.legend(handles=legend_elements, loc='upper right', 
                            bbox_to_anchor=(1.0, 1.0), fontsize=8, 
@@ -677,16 +881,16 @@ class DroneRoutingVisualizer:
         self.ax_metrics.legend()
         self.ax_metrics.grid(True, alpha=0.3)
 
-# Main simulation function
-def run_simulation(region='texas', size='medium', duration=300.0, dt=2.0, order_rate=0.9):
-    """Run the complete simulation"""
+# MODIFIED: Main simulation function with slower animation and data collection
+def run_simulation(region='texas', size='medium', duration=300.0, dt=1.0, order_rate=0.9):
+    """Run the complete simulation with data collection"""
     
     # Generate problem instance
     instance = RealWorldDataGenerator.generate_instance(region, size, duration)
     
     # Drone specifications
     drone_specs = {
-        'speed': 2.0,  # units per time step
+        'speed': 1.5,  # MODIFIED: Reduced speed for better visualization
         'battery_capacity': 100.0,
         'payload_capacity': 10.0
     }
@@ -712,10 +916,10 @@ def run_simulation(region='texas', size='medium', duration=300.0, dt=2.0, order_
             order_index += 1
         
         # Also add some random orders based on order rate
-        if random.random() < order_rate:
+        if random.random() < order_rate * dt / 10:  # MODIFIED: Adjusted for slower animation
             (min_lon, max_lon), (min_lat, max_lat) = instance['bounds']
             random_order = Order(
-                id=len(orders) + len(new_orders),
+                id=len(orders) + len(new_orders) + frame * 1000,  # Unique ID
                 pickup_location=(random.uniform(min_lon, max_lon), 
                                random.uniform(min_lat, max_lat)),
                 delivery_location=(random.uniform(min_lon, max_lon), 
@@ -733,26 +937,39 @@ def run_simulation(region='texas', size='medium', duration=300.0, dt=2.0, order_
         visualizer.update_visualization(frame)
         
         # Print metrics periodically
-        if frame % 10 == 0:
+        if frame % 20 == 0:  # MODIFIED: Adjusted frequency for slower animation
             metrics = optimizer.metrics
             print(f"Time: {optimizer.current_time:.1f}, "
                   f"Completed: {metrics['total_orders_completed']}, "
                   f"Pending: {len(optimizer.pending_orders)}, "
+                  f"Training samples: {len(optimizer.training_data)}, "
                   f"Avg Delivery: {metrics['average_delivery_time']:.2f}")
     
-    # Create animation
+    # MODIFIED: Slower animation with increased interval
     ani = animation.FuncAnimation(visualizer.fig, animate, 
                                  frames=int(duration/dt), 
-                                 interval=int(dt*100), 
+                                 interval=int(dt*200),  # MODIFIED: Slower animation (200ms per frame)
                                  repeat=False, blit=False)
     
     plt.tight_layout()
-    return ani, optimizer, visualizer
+
+    # plt.tight_layout()
+
+    # Set up a callback to save data when animation ends
+    def on_animation_complete():
+        optimizer.save_training_data("greedy_training_data.pkl")
+        print("Training data saved after animation completion.")
+
+    # Connect the callback to figure close event
+    visualizer.fig.canvas.mpl_connect('close_event', lambda evt: on_animation_complete())
+
+    plt.show()
+    # return ani, optimizer, visualizer
 
 # Example usage and testing
 if __name__ == "__main__":
-    print("Multi-Depot Dynamic Drone Routing System")
-    print("=" * 50)
+    print("Multi-Depot Dynamic Drone Routing System with Enhanced Visualization and Data Collection")
+    print("=" * 80)
     
     # Generate and display instance information
     for region in ['arkansas', 'north_carolina', 'utah', 'texas']:
@@ -763,7 +980,7 @@ if __name__ == "__main__":
                   f"{sum(len(d.drones) for d in instance['depots'])} drones, "
                   f"{len(instance['orders'])} orders")
     
-    print("\nStarting simulation...")
-    # Run simulation (uncomment to run)
-    ani, optimizer, visualizer = run_simulation('texas', 'large', duration=200.0)
-    plt.show()
+    print("\nStarting simulation with data collection...")
+    
+    # MODIFIED: Run simulation with slower animation and data collection
+    run_simulation('texas', 'large', duration=350.0, dt=2.0, order_rate=0.3)

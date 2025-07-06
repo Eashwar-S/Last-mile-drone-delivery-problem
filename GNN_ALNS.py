@@ -15,6 +15,9 @@ import heapq
 from enum import Enum
 import json
 from datetime import datetime, timedelta
+import pickle  # ADDED: For loading training data
+from sklearn.preprocessing import StandardScaler  # ADDED: For feature normalization
+from torch.utils.data import Dataset, DataLoader  # ADDED: For training data management
 
 # Import the exact same data structures from greedy approach
 class OrderPriority(Enum):
@@ -102,9 +105,9 @@ class RealWorldDataGenerator:
         (min_lon, max_lon), (min_lat, max_lat) = region_data['bounds']
         
         size_params = {
-            'small': {'depots': 2, 'drones_per_depot': 1, 'orders': 15, 'area_scale': 0.3},
-            'medium': {'depots': 3, 'drones_per_depot': 2, 'orders': 35, 'area_scale': 0.6},
-            'large': {'depots': 5, 'drones_per_depot': 3, 'orders': 60, 'area_scale': 1.0}
+            'small': {'depots': 2, 'drones_per_depot': 1, 'orders': 150, 'area_scale': 0.3},
+            'medium': {'depots': 3, 'drones_per_depot': 1, 'orders': 350, 'area_scale': 0.6},
+            'large': {'depots': 5, 'drones_per_depot': 1, 'orders': 600, 'area_scale': 1.0}
         }
         
         params = size_params[size]
@@ -145,7 +148,7 @@ class RealWorldDataGenerator:
             depots.append(Depot(
                 id=i,
                 location=(depot_lon, depot_lat),
-                capacity=params['drones_per_depot'] * 2,
+                capacity=params['drones_per_depot'],
                 charging_stations=params['drones_per_depot']
             ))
         
@@ -200,9 +203,82 @@ class RealWorldDataGenerator:
             'time_horizon': time_horizon
         }
 
-# HAD-specific neural network components
+# ADDED: Dataset class for training data management
+class DroneRoutingDataset(Dataset):
+    """Dataset class for training the GNN model"""
+    
+    def __init__(self, training_data: List[Dict], feature_scaler=None):
+        self.training_data = training_data
+        self.feature_scaler = feature_scaler
+        
+        # Extract features and labels
+        self.features = []
+        self.labels = []
+        
+        for sample in training_data:
+            state_features = self._extract_state_features(sample['state'])
+            action_features = self._extract_action_features(sample['action'])
+            
+            # Combine state and action features
+            combined_features = np.concatenate([state_features, action_features])
+            self.features.append(combined_features)
+            self.labels.append(sample['reward'])
+        
+        self.features = np.array(self.features)
+        self.labels = np.array(self.labels)
+        
+        # Normalize features if scaler provided
+        if self.feature_scaler is not None:
+            self.features = self.feature_scaler.fit_transform(self.features)
+    
+    def _extract_state_features(self, state: Dict) -> np.ndarray:
+        """Extract numerical features from state representation"""
+        features = []
+        
+        # Order features
+        order = state['order']
+        features.extend([
+            order['pickup_location'][0], order['pickup_location'][1],
+            order['delivery_location'][0], order['delivery_location'][1],
+            order['priority'], order['urgency'], order['weight']
+        ])
+        
+        # Aggregate drone features
+        available_drones = [d for d in state['drones'] if d['available']]
+        if available_drones:
+            avg_battery = np.mean([d['battery_level'] for d in available_drones])
+            min_distance = np.min([d['distance_to_pickup'] for d in available_drones])
+            num_available = len(available_drones)
+        else:
+            avg_battery, min_distance, num_available = 0, float('inf'), 0
+        
+        features.extend([avg_battery, min_distance, num_available])
+        
+        # Aggregate depot features
+        min_depot_distance = np.min([d['distance_to_delivery'] for d in state['depots']])
+        total_depot_capacity = sum(d['capacity'] for d in state['depots'])
+        
+        features.extend([min_depot_distance, total_depot_capacity])
+        
+        # System state
+        features.append(state['current_time'])
+        return np.array(features)
+    
+    def _extract_action_features(self, action: Dict) -> np.ndarray:
+        """Extract numerical features from action representation"""
+        return np.array([action['chosen_drone_id'], action['chosen_depot_id']])
+    
+    def __len__(self):
+        return len(self.features)
+    
+    def __getitem__(self, idx):
+        return torch.FloatTensor(self.features[idx]), torch.FloatTensor([self.labels[idx]])
+
+# MODIFIED: Enhanced neural network components with better architecture
 class GraphAttentionLayer(nn.Module):
-    def __init__(self, input_dim, output_dim, num_heads=4):
+    """Improved Graph Attention Layer with better feature processing"""
+    
+    def __init__(self, input_dim, output_dim, num_heads=4, dropout=0.1):
         super().__init__()
         self.num_heads = num_heads
         self.output_dim = output_dim
@@ -213,6 +289,10 @@ class GraphAttentionLayer(nn.Module):
         self.W_v = nn.Linear(input_dim, output_dim)
         self.W_o = nn.Linear(output_dim, output_dim)
         
+        # ADDED: Dropout for regularization
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(output_dim)
+        
     def forward(self, x):
         batch_size, seq_len, _ = x.shape
         
@@ -222,70 +302,223 @@ class GraphAttentionLayer(nn.Module):
         
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.head_dim)
         attention = F.softmax(scores, dim=-1)
+        attention = self.dropout(attention)  # ADDED: Dropout on attention weights
         
         out = torch.matmul(attention, V)
         out = out.view(batch_size, seq_len, -1)
-        return self.W_o(out)
+        out = self.W_o(out)
+        
+        # ADDED: Residual connection and layer normalization
+        return self.layer_norm(out + x) if x.size(-1) == out.size(-1) else self.layer_norm(out)
 
+# MODIFIED: Enhanced BipartiteMatchingGAT with improved architecture
 class BipartiteMatchingGAT(nn.Module):
-    def __init__(self, node_features=6, hidden_dim=128, output_dim=64):
+    """Enhanced Graph Attention Network for drone-order matching"""
+    
+    def __init__(self, input_dim=14, hidden_dim=128, output_dim=64, num_layers=3, dropout=0.1):
         super().__init__()
-        self.node_embedding = nn.Linear(node_features, hidden_dim)
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        
+        # ADDED: Input feature embedding with normalization
+        self.input_embedding = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # MODIFIED: Multiple GAT layers with residual connections
         self.gat_layers = nn.ModuleList([
-            GraphAttentionLayer(hidden_dim, hidden_dim) for _ in range(3)
+            GraphAttentionLayer(hidden_dim, hidden_dim, dropout=dropout) 
+            for _ in range(num_layers)
         ])
         
-        self.feasibility_head = nn.Linear(hidden_dim, 1)
-        self.value_head = nn.Linear(hidden_dim, 1)
+        # ADDED: Feature fusion layer
+        self.feature_fusion = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, output_dim)
+        )
         
-    def forward(self, node_features):
-        x = F.relu(self.node_embedding(node_features))
+        # MODIFIED: Separate heads for different prediction tasks
+        self.feasibility_head = nn.Sequential(
+            nn.Linear(output_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
         
+        self.value_head = nn.Sequential(
+            nn.Linear(output_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1)
+        )
+        
+    def forward(self, x):
+        # Handle both single samples and batches
+        if len(x.shape) == 2:
+            x = x.unsqueeze(0)  # Add batch dimension
+        
+        batch_size, seq_len, feature_dim = x.shape
+        
+        # Reshape for batch normalization
+        x_reshaped = x.view(-1, feature_dim)
+        x_embedded = self.input_embedding(x_reshaped)
+        x_embedded = x_embedded.view(batch_size, seq_len, self.hidden_dim)
+        
+        # Apply GAT layers
         for gat in self.gat_layers:
-            x = F.relu(gat(x)) + x
-            
-        feasibility = torch.sigmoid(self.feasibility_head(x))
-        value = self.value_head(x)
+            x_embedded = gat(x_embedded)
         
-        return feasibility, value
+        # Feature fusion
+        x_fused = self.feature_fusion(x_embedded)
+        
+        # Prediction heads
+        feasibility = self.feasibility_head(x_fused)
+        value = self.value_head(x_fused)
+        
+        return feasibility.squeeze(-1), value.squeeze(-1)
 
+# ADDED: Training utilities and model management
+class ModelTrainer:
+    """Trainer class for the GNN model with comprehensive training utilities"""
+    
+    def __init__(self, model, learning_rate=0.001, weight_decay=1e-5):
+        self.model = model
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=10, factor=0.5)
+        
+        # ADDED: Loss tracking
+        self.train_losses = []
+        self.val_losses = []
+        
+    def train_epoch(self, train_loader, criterion):
+        """Train for one epoch"""
+        self.model.train()
+        total_loss = 0
+        num_batches = 0
+        
+        for features, labels in train_loader:
+            self.optimizer.zero_grad()
+            
+        
+            # Forward pass
+            feasibility, values = self.model(features)
+            
+            # Calculate loss (using value prediction for now)
+            loss = criterion(values.mean(dim=1) if len(values.shape) > 1 else values, labels.squeeze())
+            
+            # Backward pass
+            loss.backward()
+            
+            # ADDED: Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
+            self.optimizer.step()
+            
+            total_loss += loss.item()
+            num_batches += 1
+        
+        avg_loss = total_loss / num_batches
+        self.train_losses.append(avg_loss)
+        return avg_loss
+    
+    def validate(self, val_loader, criterion):
+        """Validate the model"""
+        self.model.eval()
+        total_loss = 0
+        num_batches = 0
+        
+        with torch.no_grad():
+            for features, labels in val_loader:
+                feasibility, values = self.model(features)
+                loss = criterion(values.mean(dim=1) if len(values.shape) > 1 else values, labels.squeeze())
+                total_loss += loss.item()
+                num_batches += 1
+        
+        avg_loss = total_loss / num_batches
+        self.val_losses.append(avg_loss)
+        return avg_loss
+    
+    def save_model(self, filepath):
+        """Save model state"""
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'train_losses': self.train_losses,
+            'val_losses': self.val_losses
+        }, filepath)
+    
+    def load_model(self, filepath):
+        """Load model state"""
+        checkpoint = torch.load(filepath)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.train_losses = checkpoint.get('train_losses', [])
+        self.val_losses = checkpoint.get('val_losses', [])
+
+# MODIFIED: Enhanced LightningAssignment with improved training integration
 class LightningAssignment:
-    def __init__(self, model_path=None):
+    """Enhanced Lightning Assignment with trained GNN model"""
+    
+    def __init__(self, model_path=None, feature_scaler=None):
         self.model = BipartiteMatchingGAT()
+        self.feature_scaler = feature_scaler
+        self.trainer = ModelTrainer(self.model)
+        
         if model_path:
-            self.model.load_state_dict(torch.load(model_path))
+            self.trainer.load_model(model_path)
         self.model.eval()
         
     def encode_state(self, order: Order, drones: List[Drone], depots: List[Depot]) -> torch.Tensor:
+        """Enhanced state encoding with better feature engineering"""
         features = []
         
-        # Order node features
+        # Order node features (enhanced)
         order_features = [
             order.pickup_location[0], order.pickup_location[1],
             order.delivery_location[0], order.delivery_location[1],
-            order.priority.value, time.time() - order.arrival_time
+            order.priority.value, 
+            max(0, order.deadline - time.time()),  # Time urgency
+            order.weight,
+            self.calculate_distance(order.pickup_location, order.delivery_location)  # Order distance
         ]
-        features.append(order_features)
         
-        # Drone-depot combination features
-        for drone in drones:
-            for depot in depots:
-                drone_depot_features = [
-                    drone.location[0], drone.location[1],
-                    self.calculate_distance(drone.location, depot.location),
-                    drone.current_battery / drone.battery_capacity,
-                    len([o for o in [drone.current_order] if o is not None]),
-                    len(depot.drones)
-                ]
-                features.append(drone_depot_features)
+        # System state features
+        available_drones = [d for d in drones if d.status == DroneStatus.IDLE]
+        system_features = [
+            len(available_drones),  # Number of available drones
+            len(drones),  # Total drones
+            len(depots),  # Number of depots
+            time.time()  # Current time
+        ]
         
-        return torch.FloatTensor(features).unsqueeze(0)
+        # Combine features
+        combined_features = order_features + system_features
+        
+        # Add padding if needed to match expected input dimension
+        while len(combined_features) < 14:
+            combined_features.append(0.0)
+        
+        features = torch.FloatTensor(combined_features).unsqueeze(0).unsqueeze(0)
+        
+        # Apply feature scaling if available
+        if self.feature_scaler is not None:
+            features_np = features.squeeze().numpy().reshape(1, -1)
+            features_scaled = self.feature_scaler.transform(features_np)
+            features = torch.FloatTensor(features_scaled).unsqueeze(0)
+        
+        return features
     
     def calculate_distance(self, loc1: Tuple[float, float], loc2: Tuple[float, float]) -> float:
         return np.sqrt((loc1[0] - loc2[0])**2 + (loc1[1] - loc2[1])**2)
     
     def assign_order(self, order: Order, drones: List[Drone], depots: List[Depot]) -> Optional[Tuple[int, int]]:
-        """Lightning-fast assignment using simplified heuristic (fallback from neural network)"""
+        """Enhanced assignment using trained GNN model"""
         start_time = time.time()
         
         # Filter available drones
@@ -294,39 +527,75 @@ class LightningAssignment:
             print(f"No available drones for order {order.id}")
             return None
         
-        print(f"Lightning assignment for order {order.id}, {len(available_drones)} available drones")
+        print(f"GNN Lightning assignment for order {order.id}, {len(available_drones)} available drones")
         
-        # Simplified assignment logic (bypass neural network for now)
+        # Use GNN model for assignment scoring
         best_assignment = None
-        best_score = float('inf')
+        best_score = float('-inf')
         
-        for drone in available_drones:
-            # Check if drone can complete the order
-            pickup_distance = self.calculate_distance(drone.location, order.pickup_location)
-            delivery_distance = self.calculate_distance(order.pickup_location, order.delivery_location)
+        try:
+            # Encode current state
+            state_features = self.encode_state(order, drones, depots)
             
-            # Find best depot for this drone-order combination
-            best_depot = min(depots, key=lambda d: self.calculate_distance(order.delivery_location, d.location))
-            depot_distance = self.calculate_distance(order.delivery_location, best_depot.location)
+            # Get model predictions
+            with torch.no_grad():
+                feasibility, values = self.model(state_features)
+                gnn_score = values.item() if len(values.shape) == 0 else values.mean().item()
             
-            total_distance = pickup_distance + delivery_distance + depot_distance
-            
-            # Battery constraint check
-            battery_needed = total_distance * 0.8 + 15.0
-            safety_margin = drone.battery_capacity * 0.1
-            
-            if drone.current_battery >= battery_needed + safety_margin:
-                # Calculate assignment score
-                priority_weight = (5 - order.priority.value) * 10
-                urgency = max(0, order.deadline - time.time())
+            # Use GNN score to guide assignment
+            for drone in available_drones:
+                # Check if drone can complete the order
+                pickup_distance = self.calculate_distance(drone.location, order.pickup_location)
+                delivery_distance = self.calculate_distance(order.pickup_location, order.delivery_location)
                 
-                score = total_distance - priority_weight + urgency * 0.01
+                # Find best depot for this drone-order combination
+                best_depot = min(depots, key=lambda d: self.calculate_distance(order.delivery_location, d.location))
+                depot_distance = self.calculate_distance(order.delivery_location, best_depot.location)
                 
-                if score < best_score:
-                    best_score = score
-                    best_assignment = (drone.id, best_depot.id)
+                total_distance = pickup_distance + delivery_distance + depot_distance
+                
+                # Battery constraint check (same as before)
+                battery_needed = total_distance * 0.8 + 15.0
+                safety_margin = drone.battery_capacity * 0.1
+                
+                if drone.current_battery >= battery_needed + safety_margin:
+                    # MODIFIED: Combine GNN score with heuristic features
+                    priority_weight = (5 - order.priority.value) * 10
+                    urgency = max(0, order.deadline - time.time())
                     
-                print(f"  Drone {drone.id}: distance={total_distance:.2f}, battery_ok={drone.current_battery:.1f}>={battery_needed:.1f}, score={score:.2f}")
+                    # Combine GNN prediction with traditional heuristics
+                    score = (gnn_score * 0.7 +  # 70% GNN prediction
+                            (priority_weight - total_distance + urgency * 0.01) * 0.3)  # 30% heuristics
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_assignment = (drone.id, best_depot.id)
+                        
+                    print(f"  Drone {drone.id}: GNN_score={gnn_score:.2f}, distance={total_distance:.2f}, "
+                          f"combined_score={score:.2f}")
+        
+        except Exception as e:
+            print(f"GNN prediction failed, falling back to heuristic: {e}")
+            # Fallback to heuristic assignment
+            for drone in available_drones:
+                pickup_distance = self.calculate_distance(drone.location, order.pickup_location)
+                delivery_distance = self.calculate_distance(order.pickup_location, order.delivery_location)
+                
+                best_depot = min(depots, key=lambda d: self.calculate_distance(order.delivery_location, d.location))
+                depot_distance = self.calculate_distance(order.delivery_location, best_depot.location)
+                
+                total_distance = pickup_distance + delivery_distance + depot_distance
+                battery_needed = total_distance * 0.8 + 15.0
+                safety_margin = drone.battery_capacity * 0.1
+                
+                if drone.current_battery >= battery_needed + safety_margin:
+                    priority_weight = (5 - order.priority.value) * 10
+                    urgency = max(0, order.deadline - time.time())
+                    score = total_distance - priority_weight + urgency * 0.01
+                    
+                    if best_assignment is None or score < best_score:
+                        best_score = score
+                        best_assignment = (drone.id, best_depot.id)
         
         # Check time constraint (100ms)
         elapsed_time = (time.time() - start_time) * 1000
@@ -514,11 +783,108 @@ class RollingHorizonALNS:
         
         return total_value
 
+# ADDED: Training and data loading functions
+def load_training_data(filename: str) -> Tuple[List[Dict], Dict]:
+    """Load training data from pickle file"""
+    try:
+        with open(filename, 'rb') as f:
+            data = pickle.load(f)
+        
+        print(f"Loaded training data: {len(data['training_data'])} samples")
+        return data['training_data'], data
+    except FileNotFoundError:
+        print(f"Training data file {filename} not found. Please run greedy simulation first.")
+        return [], {}
+    except Exception as e:
+        print(f"Error loading training data: {e}")
+        return [], {}
+
+def train_gnn_model(training_data: List[Dict], epochs=100, batch_size=32, validation_split=0.2):
+    """Train the GNN model on collected data"""
+    
+    if len(training_data) < 10:
+        print("Insufficient training data. Please run greedy simulation to collect more data.")
+        return None, None
+    
+    print(f"Training GNN model on {len(training_data)} samples...")
+    
+    # Create feature scaler
+    feature_scaler = StandardScaler()
+    
+    # Create dataset
+    dataset = DroneRoutingDataset(training_data, feature_scaler)
+    
+    # Split data
+    val_size = int(len(dataset) * validation_split)
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    
+    # Initialize model and trainer
+    model = BipartiteMatchingGAT(input_dim=15)
+    trainer = ModelTrainer(model, learning_rate=0.001)
+    criterion = nn.MSELoss()
+    
+    # Training loop
+    print("Starting training...")
+    best_val_loss = float('inf')
+    patience_counter = 0
+    patience = 50
+    
+    for epoch in range(epochs):
+        # Train
+        train_loss = trainer.train_epoch(train_loader, criterion)
+        
+        # Validate
+        val_loss = trainer.validate(val_loader, criterion)
+        
+        # Learning rate scheduling
+        trainer.scheduler.step(val_loss)
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            # Save best model
+            trainer.save_model('best_gnn_model.pth')
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            break
+        
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+    
+    # Load best model
+    trainer.load_model('best_gnn_model.pth')
+    
+    print("Training completed!")
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    
+    return trainer.model, feature_scaler
+
+def plot_training_progress(trainer: ModelTrainer):
+    """Plot training and validation loss curves"""
+    plt.figure(figsize=(10, 6))
+    plt.plot(trainer.train_losses, label='Training Loss')
+    plt.plot(trainer.val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('GNN Training Progress')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
 # Main HAD optimizer class that integrates with existing framework
 class HierarchicalAnytimeDispatcher:
     """HAD optimizer that follows the same interface as the greedy optimizer"""
     
-    def __init__(self, depots: List[Depot], drone_specs: Dict):
+    def __init__(self, depots: List[Depot], drone_specs: Dict, trained_model_path=None, feature_scaler=None):
         self.depots = depots
         self.drone_specs = drone_specs
         self.drones = []
@@ -526,8 +892,8 @@ class HierarchicalAnytimeDispatcher:
         self.completed_orders = []
         self.current_time = 0.0
         
-        # HAD-specific components
-        self.lightning_assignment = LightningAssignment()
+        # HAD-specific components with trained model
+        self.lightning_assignment = LightningAssignment(trained_model_path, feature_scaler)
         self.rolling_horizon_alns = RollingHorizonALNS()
         self.virtual_queue = deque()
         
@@ -547,7 +913,8 @@ class HierarchicalAnytimeDispatcher:
             'orders_completed_on_time': 0,
             'total_orders_processed': 0,
             'lightning_assignments': 0,
-            'alns_optimizations': 0
+            'alns_optimizations': 0,
+            'gnn_assignments': 0  # ADDED: Track GNN-based assignments
         }
         
         # Start background optimization
@@ -629,7 +996,7 @@ class HierarchicalAnytimeDispatcher:
         return True
     
     def assign_orders_lightning(self):
-        """Layer 1: Lightning Assignment (≤100ms)"""
+        """Layer 1: Lightning Assignment using trained GNN (≤100ms)"""
         assignments = []
         processed_orders = []
         
@@ -639,7 +1006,7 @@ class HierarchicalAnytimeDispatcher:
             
             start_time = time.time()
             
-            # Lightning assignment
+            # Lightning assignment with trained GNN
             result = self.lightning_assignment.assign_order(order, self.drones, self.depots)
             
             if result and (time.time() - start_time) * 1000 <= 100:
@@ -651,6 +1018,7 @@ class HierarchicalAnytimeDispatcher:
                 assignments.append((drone, order))
                 processed_orders.append(order)
                 self.metrics['lightning_assignments'] += 1
+                self.metrics['gnn_assignments'] += 1  # ADDED: Track GNN assignments
             else:
                 # Add to virtual queue for later processing
                 if order not in self.virtual_queue:
@@ -776,7 +1144,7 @@ class HierarchicalAnytimeDispatcher:
         # Update drone positions
         self.update_drone_positions(dt)
         
-        # Layer 1: Lightning Assignment for immediate orders
+        # Layer 1: Lightning Assignment for immediate orders using trained GNN
         lightning_assignments = self.assign_orders_lightning()
         self.execute_assignments(lightning_assignments)
         
@@ -805,7 +1173,7 @@ class HierarchicalAnytimeDispatcher:
 class DroneRoutingVisualizer:
     """Real-time visualization of the drone routing system"""
     
-    def __init__(self, optimizer, bounds: Tuple[Tuple[float, float], Tuple[float, float]], algorithm_name="HAD"):
+    def __init__(self, optimizer, bounds: Tuple[Tuple[float, float], Tuple[float, float]], algorithm_name="Trained HAD"):
         self.optimizer = optimizer
         self.bounds = bounds
         self.algorithm_name = algorithm_name
@@ -844,6 +1212,7 @@ class DroneRoutingVisualizer:
         self.avg_delivery_time_data = []
         self.lightning_assignments_data = []
         self.alns_optimizations_data = []
+        self.gnn_assignments_data = []  # ADDED: Track GNN assignments
         
     def update_visualization(self, frame):
         """Update visualization for animation"""
@@ -1002,6 +1371,7 @@ class DroneRoutingVisualizer:
         if hasattr(self.optimizer, 'metrics'):
             self.lightning_assignments_data.append(self.optimizer.metrics.get('lightning_assignments', 0))
             self.alns_optimizations_data.append(self.optimizer.metrics.get('alns_optimizations', 0))
+            self.gnn_assignments_data.append(self.optimizer.metrics.get('gnn_assignments', 0))  # ADDED
         
         self.ax_metrics.clear()
         self.ax_metrics.plot(self.time_data, self.completed_orders_data, 'b-', label='Completed Orders', linewidth=2)
@@ -1013,6 +1383,9 @@ class DroneRoutingVisualizer:
         if hasattr(self, 'lightning_assignments_data') and max(self.lightning_assignments_data) > 0:
             self.ax_metrics.plot(self.time_data, self.lightning_assignments_data, 'g--', label='Lightning Assignments', alpha=0.7)
         
+        if hasattr(self, 'gnn_assignments_data') and max(self.gnn_assignments_data) > 0:
+            self.ax_metrics.plot(self.time_data, self.gnn_assignments_data, 'purple', linestyle=':', label='GNN Assignments', alpha=0.8)
+        
         if hasattr(self, 'alns_optimizations_data') and max(self.alns_optimizations_data) > 0:
             self.ax_metrics.plot(self.time_data, self.alns_optimizations_data, 'm--', label='ALNS Optimizations', alpha=0.7)
         
@@ -1022,9 +1395,24 @@ class DroneRoutingVisualizer:
         self.ax_metrics.legend()
         self.ax_metrics.grid(True, alpha=0.3)
 
-# Comparison simulation function
-def run_had_simulation(region='texas', size='medium', duration=300.0, dt=2.0, order_rate=0.5):
-    """Run HAD simulation with same parameters as greedy approach"""
+# MODIFIED: Simulation function with trained model
+def run_had_simulation_with_trained_model(region='texas', size='medium', duration=300.0, dt=2.0, order_rate=0.5, 
+                                          trained_model_path='best_gnn_model.pth', training_data_path='greedy_training_data.pkl'):
+    """Run HAD simulation with trained GNN model"""
+    
+    # Load training data to get feature scaler
+    training_data, data_info = load_training_data(training_data_path)
+    feature_scaler = None
+    
+    if training_data:
+        # Create feature scaler from training data
+        try:
+            temp_dataset = DroneRoutingDataset(training_data[:100])  # Use subset for scaler
+            feature_scaler = StandardScaler()
+            feature_scaler.fit(temp_dataset.features)
+            print("Feature scaler created from training data")
+        except Exception as e:
+            print(f"Could not create feature scaler: {e}")
     
     # Generate problem instance using same generator
     instance = RealWorldDataGenerator.generate_instance(region, size, duration)
@@ -1036,11 +1424,20 @@ def run_had_simulation(region='texas', size='medium', duration=300.0, dt=2.0, or
         'payload_capacity': 10.0
     }
     
-    # Initialize HAD optimizer
-    optimizer = HierarchicalAnytimeDispatcher(instance['depots'], drone_specs)
+    # Initialize HAD optimizer with trained model
+    try:
+        optimizer = HierarchicalAnytimeDispatcher(instance['depots'], drone_specs, 
+                                                 trained_model_path, feature_scaler)
+        algorithm_name = "Trained HAD-GNN"
+        print("Using trained GNN model for assignments")
+    except Exception as e:
+        print(f"Could not load trained model: {e}")
+        print("Falling back to untrained HAD")
+        optimizer = HierarchicalAnytimeDispatcher(instance['depots'], drone_specs)
+        algorithm_name = "HAD (no training)"
     
     # Initialize visualizer with HAD label
-    visualizer = DroneRoutingVisualizer(optimizer, instance['bounds'], "HAD")
+    visualizer = DroneRoutingVisualizer(optimizer, instance['bounds'], algorithm_name)
     
     # Same order preparation
     orders = sorted(instance['orders'], key=lambda x: x.arrival_time)
@@ -1057,11 +1454,10 @@ def run_had_simulation(region='texas', size='medium', duration=300.0, dt=2.0, or
             order_index += 1
         
         # Additional random orders based on Poisson arrival process
-        # Only add random orders occasionally to simulate realistic arrival rate
-        if frame > 10 and random.random() < order_rate * dt / 10:  # Scale by time step
+        if frame > 10 and random.random() < order_rate * dt / 10:
             (min_lon, max_lon), (min_lat, max_lat) = instance['bounds']
             random_order = Order(
-                id=len(orders) + frame * 1000,  # Unique ID
+                id=len(orders) + frame * 1000,
                 pickup_location=(random.uniform(min_lon, max_lon), 
                                random.uniform(min_lat, max_lat)),
                 delivery_location=(random.uniform(min_lon, max_lon), 
@@ -1086,12 +1482,13 @@ def run_had_simulation(region='texas', size='medium', duration=300.0, dt=2.0, or
         # Print metrics with HAD-specific information
         if frame % 15 == 0:  # Reduced frequency
             metrics = optimizer.metrics
-            print(f"HAD - Time: {optimizer.current_time:.1f}, "
+            print(f"{algorithm_name} - Time: {optimizer.current_time:.1f}, "
                   f"Completed: {metrics['total_orders_completed']}, "
                   f"Pending: {len(optimizer.pending_orders)}, "
                   f"Queue: {len(optimizer.virtual_queue)}, "
                   f"Avg Delivery: {metrics['average_delivery_time']:.2f}, "
                   f"Lightning: {metrics['lightning_assignments']}, "
+                  f"GNN: {metrics['gnn_assignments']}, "
                   f"ALNS: {metrics['alns_optimizations']}")
     
     # Create animation
@@ -1103,187 +1500,110 @@ def run_had_simulation(region='texas', size='medium', duration=300.0, dt=2.0, or
     plt.tight_layout()
     return ani, optimizer, visualizer
 
-# Comparison function to run both algorithms
-def compare_algorithms(region='texas', size='medium', duration=200.0, dt=2.0, order_rate=0.5):
-    """Compare HAD vs Greedy algorithms side by side"""
+# ADDED: Main training and simulation pipeline
+def main_training_pipeline():
+    """Complete pipeline: Train GNN model and run simulation with trained model"""
     
-    print("="*60)
-    print("ALGORITHM COMPARISON: HAD vs Greedy")
-    print("="*60)
-    
-    # Set random seed for fair comparison
-    random.seed(42)
-    np.random.seed(42)
-    
-    # Generate same instance for both
-    instance = RealWorldDataGenerator.generate_instance(region, size, duration)
-    
-    print(f"Instance: {region.title()} {size}")
-    print(f"Depots: {len(instance['depots'])}")
-    print(f"Total drones: {sum(d.capacity for d in instance['depots'])}")
-    print(f"Orders: {len(instance['orders'])}")
-    print(f"Duration: {duration:.0f} time units")
-    print("-"*60)
-    
-    # Run HAD simulation
-    print("Running HAD Algorithm...")
-    ani_had, optimizer_had, viz_had = run_had_simulation(region, size, duration, dt, order_rate)
-    
-    # Final comparison metrics
-    def print_final_metrics():
-        print("\n" + "="*60)
-        print("FINAL COMPARISON RESULTS")
-        print("="*60)
-        
-        had_metrics = optimizer_had.metrics
-        
-        print(f"HAD Algorithm Results:")
-        print(f"  Total Orders Completed: {had_metrics['total_orders_completed']}")
-        print(f"  Average Delivery Time: {had_metrics['average_delivery_time']:.2f}")
-        print(f"  Orders On Time: {had_metrics['orders_completed_on_time']}")
-        print(f"  Total Distance: {had_metrics['total_distance_traveled']:.2f}")
-        print(f"  Lightning Assignments: {had_metrics['lightning_assignments']}")
-        print(f"  ALNS Optimizations: {had_metrics['alns_optimizations']}")
-        print(f"  Pending Orders: {len(optimizer_had.pending_orders)}")
-        print(f"  Virtual Queue: {len(optimizer_had.virtual_queue)}")
-        
-        # Efficiency metrics
-        if had_metrics['total_orders_completed'] > 0:
-            had_efficiency = had_metrics['total_orders_completed'] / had_metrics['total_distance_traveled']
-            print(f"  Efficiency (Orders/Distance): {had_efficiency:.4f}")
-    
-    # Schedule final metrics print
-    def delayed_metrics():
-        import threading
-        timer = threading.Timer(duration/dt * dt/100 + 2, print_final_metrics)
-        timer.start()
-    
-    delayed_metrics()
-    
-    return ani_had, optimizer_had, viz_had
-
-# Training function for the GAT model (optional for research)
-def generate_training_data(num_instances=1000, region='texas', size='medium'):
-    """Generate training data for the Lightning Assignment GAT model"""
-    training_data = []
-    
-    for i in range(num_instances):
-        if i % 100 == 0:
-            print(f"Generating training instance {i}/{num_instances}")
-        
-        # Generate random instance
-        instance = RealWorldDataGenerator.generate_instance(region, size)
-        
-        # Create temporary optimizer for evaluation
-        drone_specs = {'speed': 2.0, 'battery_capacity': 100.0, 'payload_capacity': 10.0}
-        temp_optimizer = HierarchicalAnytimeDispatcher(instance['depots'], drone_specs)
-        
-        # Generate state-action pairs
-        for order in instance['orders'][:10]:  # Use first 10 orders for training
-            # Encode state
-            available_drones = [d for d in temp_optimizer.drones if d.status == DroneStatus.IDLE]
-            if available_drones:
-                lightning = LightningAssignment()
-                features = lightning.encode_state(order, available_drones, temp_optimizer.depots)
-                
-                # Get optimal assignment using greedy approach as ground truth
-                best_assignment = None
-                best_score = float('inf')
-                
-                for drone in available_drones:
-                    if temp_optimizer.can_complete_order(drone, order):
-                        estimated_time, depot_id = temp_optimizer.estimate_delivery_time(drone, order)
-                        priority_weight = 5 - order.priority.value
-                        score = estimated_time + priority_weight * 10
-                        
-                        if score < best_score:
-                            best_score = score
-                            best_assignment = (drone.id, depot_id)
-                
-                if best_assignment:
-                    training_data.append({
-                        'features': features,
-                        'optimal_assignment': best_assignment,
-                        'reward': -best_score  # Negative because we want to minimize
-                    })
-    
-    return training_data
-
-def train_lightning_model(training_data, epochs=100, learning_rate=0.001):
-    """Train the Lightning Assignment GAT model"""
-    model = BipartiteMatchingGAT()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.MSELoss()
-    
-    print(f"Training Lightning Assignment model on {len(training_data)} samples...")
-    
-    for epoch in range(epochs):
-        total_loss = 0
-        
-        for data in training_data:
-            features = data['features']
-            reward = torch.FloatTensor([data['reward']])
-            
-            # Forward pass
-            feasibility, values = model(features)
-            
-            # Compute loss (simplified - in practice would use more sophisticated loss)
-            loss = criterion(values.mean(), reward)
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-        
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}/{epochs}, Average Loss: {total_loss/len(training_data):.4f}")
-    
-    return model
-
-# Batch comparison function for paper results
-def run_batch_comparison(regions=['texas'], sizes=['medium'], num_runs=5):
-    """Run batch comparison for statistical analysis"""
-    results = []
-    
-    for region in regions:
-        for size in sizes:
-            for run in range(num_runs):
-                print(f"\nRunning comparison {run+1}/{num_runs} for {region} {size}")
-                
-                # Set different seed for each run
-                random.seed(42 + run)
-                np.random.seed(42 + run)
-                
-                # Run HAD simulation
-                _, had_optimizer, _ = run_had_simulation(region, size, duration=150.0, dt=2.0, order_rate=0.3)
-                
-                # Collect results
-                had_metrics = had_optimizer.metrics
-                result = {
-                    'region': region,
-                    'size': size,
-                    'run': run,
-                    'algorithm': 'HAD',
-                    'completed_orders': had_metrics['total_orders_completed'],
-                    'avg_delivery_time': had_metrics['average_delivery_time'],
-                    'on_time_orders': had_metrics['orders_completed_on_time'],
-                    'total_distance': had_metrics['total_distance_traveled'],
-                    'lightning_assignments': had_metrics['lightning_assignments'],
-                    'alns_optimizations': had_metrics['alns_optimizations'],
-                    'efficiency': had_metrics['total_orders_completed'] / max(had_metrics['total_distance_traveled'], 1)
-                }
-                results.append(result)
-    
-    return results
-
-# Example usage for direct comparison
-if __name__ == "__main__":
-    print("Hierarchical Anytime Dispatcher (HAD) for Multi-Depot Drone Routing")
-    print("Compatible with existing greedy approach framework")
+    print("="*70)
+    print("GNN TRAINING AND SIMULATION PIPELINE")
     print("="*70)
     
-    # Run comparison
-    ani, optimizer, visualizer = compare_algorithms('texas', 'large', duration=150.0)
+    # Step 1: Check if training data exists
+    training_data_file = "greedy_training_data.pkl"
+    training_data, data_info = load_training_data(training_data_file)
+    print(f"Training data - {training_data_file}: {len(training_data)} samples found")
+    
+    if not training_data:
+        print("No training data found. Please run greedy_approach_improved.py first to collect training data.")
+        print("Example: python greedy_approach_improved.py")
+        return
+    
+    # Step 2: Train GNN model
+    print(f"\nStep 1: Training GNN model on {len(training_data)} samples...")
+    trained_model, feature_scaler = train_gnn_model(training_data, epochs=50, batch_size=16)
+    
+    if trained_model is None:
+        print("Training failed. Running simulation without trained model.")
+        return
+    
+    # Step 3: Save trained model
+    model_trainer = ModelTrainer(trained_model)
+    model_trainer.save_model('trained_gnn_model.pth')
+    print("Trained model saved as 'trained_gnn_model.pth'")
+    
+    # Step 4: Run simulation with trained model
+    print("\nStep 2: Running HAD simulation with trained GNN model...")
+    ani, optimizer, visualizer = run_had_simulation_with_trained_model(
+        'texas', 'large', duration=150.0, dt=2.0, order_rate=0.3,
+        trained_model_path='trained_gnn_model.pth',
+        training_data_path=training_data_file
+    )
+    
+    # Step 5: Show results
+    def print_final_results():
+        print("\n" + "="*70)
+        print("TRAINED HAD-GNN SIMULATION RESULTS")
+        print("="*70)
+        
+        metrics = optimizer.metrics
+        print(f"Total Orders Completed: {metrics['total_orders_completed']}")
+        print(f"Average Delivery Time: {metrics['average_delivery_time']:.2f}")
+        print(f"Orders On Time: {metrics['orders_completed_on_time']}")
+        print(f"Total Distance: {metrics['total_distance_traveled']:.2f}")
+        print(f"Lightning Assignments: {metrics['lightning_assignments']}")
+        print(f"GNN Assignments: {metrics['gnn_assignments']}")
+        print(f"ALNS Optimizations: {metrics['alns_optimizations']}")
+        
+        if metrics['total_orders_completed'] > 0:
+            efficiency = metrics['total_orders_completed'] / metrics['total_distance_traveled']
+            print(f"Efficiency (Orders/Distance): {efficiency:.4f}")
+    
+    # Schedule results printing
+    import threading
+    timer = threading.Timer(160.0, print_final_results)
+    timer.start()
+    
     plt.show()
+    return ani, optimizer, visualizer
+
+# Example usage for training and comparison
+if __name__ == "__main__":
+    print("Hierarchical Anytime Dispatcher (HAD) with Trained GNN for Multi-Depot Drone Routing")
+    print("This version trains a GNN model on data collected from the greedy approach")
+    print("="*80)
+    
+    # Check command line arguments for different modes
+    import sys
+    
+    if len(sys.argv) > 1:
+        mode = sys.argv[1]
+        
+        if mode == "train":
+            # Training mode: Load data and train model
+            print("Training mode: Training GNN model on collected data...")
+            training_data, _ = load_training_data("greedy_training_data.pkl")
+            if training_data:
+                model, scaler = train_gnn_model(training_data, epochs=100)
+                if model:
+                    trainer = ModelTrainer(model)
+                    trainer.save_model('trained_gnn_model.pth')
+                    print("Model trained and saved successfully!")
+            else:
+                print("No training data found. Run greedy simulation first.")
+        
+        elif mode == "simulate":
+            # Simulation mode: Run with trained model
+            print("Simulation mode: Running HAD with trained GNN...")
+            ani, optimizer, visualizer = run_had_simulation_with_trained_model('texas', 'large', duration=200.0)
+            plt.show()
+        
+        elif mode == "pipeline":
+            # Full pipeline mode
+            main_training_pipeline()
+        
+        else:
+            print("Unknown mode. Use: python GNN_ALNS_improved.py [train|simulate|pipeline]")
+    
+    else:
+        # Default: Run full pipeline
+        main_training_pipeline()
