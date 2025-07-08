@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 import pickle  # ADDED: For loading training data
 from sklearn.preprocessing import StandardScaler  # ADDED: For feature normalization
 from torch.utils.data import Dataset, DataLoader  # ADDED: For training data management
+import os
+import pickle  # Ensure this is imported at the top of your script if not already
 
 # Import the exact same data structures from greedy approach
 class OrderPriority(Enum):
@@ -1498,7 +1500,131 @@ def run_had_simulation_with_trained_model(region='texas', size='medium', duratio
                                  repeat=False, blit=False)
     
     plt.tight_layout()
-    return ani, optimizer, visualizer
+    metrics = optimizer.metrics
+    final_result = (f"{algorithm_name} - Time: {optimizer.current_time:.1f}, "
+                  f"Completed: {metrics['total_orders_completed']}, "
+                  f"Pending: {len(optimizer.pending_orders)}, "
+                  f"Queue: {len(optimizer.virtual_queue)}, "
+                  f"Avg Delivery: {metrics['average_delivery_time']:.2f}, "
+                  f"Lightning: {metrics['lightning_assignments']}, "
+                  f"GNN: {metrics['gnn_assignments']}, "
+                  f"ALNS: {metrics['alns_optimizations']}")
+    
+
+    return ani, optimizer, visualizer, final_result
+
+
+# MODIFIED: Simulation function with trained model
+
+
+
+
+
+def run_test_simulation_with_trained_model(region, size, instance, duration=300.0, dt=2.0, order_rate=0.3, 
+                                           trained_model_path='best_gnn_model.pth', training_data_path='greedy_training_data.pkl'):
+    """Run HAD simulation with trained GNN model"""
+
+    # Load training data to create feature scaler
+    training_data, data_info = load_training_data(training_data_path)
+    feature_scaler = None
+
+    if training_data:
+        try:
+            temp_dataset = DroneRoutingDataset(training_data[:100])
+            feature_scaler = StandardScaler()
+            feature_scaler.fit(temp_dataset.features)
+            print("Feature scaler created from training data")
+        except Exception as e:
+            print(f"Could not create feature scaler: {e}")
+
+    # Drone specifications
+    drone_specs = {
+        'speed': 2.0,
+        'battery_capacity': 100.0,
+        'payload_capacity': 10.0
+    }
+
+    # Initialize optimizer with or without trained model
+    try:
+        optimizer = HierarchicalAnytimeDispatcher(instance['depots'], drone_specs, trained_model_path, feature_scaler)
+        algorithm_name = "Trained HAD-GNN"
+        print("Using trained GNN model for assignments")
+    except Exception as e:
+        print(f"Could not load trained model: {e}")
+        print("Falling back to untrained HAD")
+        optimizer = HierarchicalAnytimeDispatcher(instance['depots'], drone_specs)
+        algorithm_name = "HAD (no training)"
+
+    visualizer = DroneRoutingVisualizer(optimizer, instance['bounds'], algorithm_name)
+
+    orders = sorted(instance['orders'], key=lambda x: x.arrival_time)
+    order_index = 0
+    total_frames = int(duration / dt)
+    final_result = None  # Store final metrics
+
+    def animate(frame):
+        nonlocal order_index, final_result
+
+        new_orders = []
+        while order_index < len(orders) and orders[order_index].arrival_time <= optimizer.current_time:
+            new_orders.append(orders[order_index])
+            order_index += 1
+
+        if frame > 10 and random.random() < order_rate * dt / 10:
+            (min_lon, max_lon), (min_lat, max_lat) = instance['bounds']
+            random_order = Order(
+                id=len(orders) + frame * 1000,
+                pickup_location=(random.uniform(min_lon, max_lon), random.uniform(min_lat, max_lat)),
+                delivery_location=(random.uniform(min_lon, max_lon), random.uniform(min_lat, max_lat)),
+                priority=random.choice(list(OrderPriority)),
+                arrival_time=optimizer.current_time,
+                deadline=optimizer.current_time + random.uniform(60, 300),
+                weight=random.uniform(0.5, 5.0)
+            )
+            new_orders.append(random_order)
+
+        if new_orders:
+            print(f"Time {optimizer.current_time:.1f}: {len(new_orders)} new orders arrived")
+
+        optimizer.step(dt, new_orders)
+        visualizer.update_visualization(frame)
+
+        if frame % 15 == 0:
+            metrics = optimizer.metrics
+            print(f"{algorithm_name} - Time: {optimizer.current_time:.1f}, "
+                  f"Completed: {metrics['total_orders_completed']}, "
+                  f"Pending: {len(optimizer.pending_orders)}, "
+                  f"Queue: {len(optimizer.virtual_queue)}, "
+                  f"Avg Delivery: {metrics['average_delivery_time']:.2f}, "
+                  f"Lightning: {metrics['lightning_assignments']}, "
+                  f"GNN: {metrics['gnn_assignments']}, "
+                  f"ALNS: {metrics['alns_optimizations']}")
+
+        # Final frame: save data and close
+        if frame == total_frames - 1:
+            #optimizer.save_training_data("greedy_training_data.pkl")
+            print("Training data saved after animation completion.")
+            metrics = optimizer.metrics
+            final_result = (f"{algorithm_name} - Time: {optimizer.current_time:.1f}, "
+                  f"Completed: {metrics['total_orders_completed']}, "
+                  f"Pending: {len(optimizer.pending_orders)}, "
+                  f"Queue: {len(optimizer.virtual_queue)}, "
+                  f"Avg Delivery: {metrics['average_delivery_time']:.2f}, "
+                  f"Lightning: {metrics['lightning_assignments']}, "
+                  f"GNN: {metrics['gnn_assignments']}, "
+                  f"ALNS: {metrics['alns_optimizations']}")
+            
+            plt.close(visualizer.fig)
+
+    ani = animation.FuncAnimation(visualizer.fig, animate,
+                                  frames=total_frames,
+                                  interval=int(dt * 100),
+                                  repeat=False, blit=False)
+
+    plt.tight_layout()
+    plt.show()  # This blocks until animation is complete
+
+    return ani, optimizer, visualizer, final_result
 
 # ADDED: Main training and simulation pipeline
 def main_training_pipeline():
@@ -1578,6 +1704,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         mode = sys.argv[1]
         
+        
         if mode == "train":
             # Training mode: Load data and train model
             print("Training mode: Training GNN model on collected data...")
@@ -1594,12 +1721,52 @@ if __name__ == "__main__":
         elif mode == "simulate":
             # Simulation mode: Run with trained model
             print("Simulation mode: Running HAD with trained GNN...")
-            ani, optimizer, visualizer = run_had_simulation_with_trained_model('texas', 'large', duration=200.0)
+            ani, optimizer, visualizer, final_result = run_had_simulation_with_trained_model('texas', 'large', duration=200.0)
+            
             plt.show()
         
         elif mode == "pipeline":
             # Full pipeline mode
             main_training_pipeline()
+
+        elif mode == "test":
+            
+            results_file = "results_GNN.txt"
+            print("Test Simulation mode: Running HAD with trained GNN...")
+
+            test_data_path = sys.argv[2] if len(sys.argv) > 2 else None
+            if not test_data_path or not os.path.exists(test_data_path):
+                print("❌ Error: Provide a valid path to test data (a directory or a .pkl file).")
+                sys.exit(1)
+
+            with open(results_file, "w") as txt:
+
+                # Case 1: If it's a directory of .pkl instance files
+                if os.path.isdir(test_data_path):
+                    instance_files = [f for f in os.listdir(test_data_path) if f.endswith(".pkl")]
+                    for file_name in instance_files:
+                        full_path = os.path.join(test_data_path, file_name)
+                        with open(full_path, 'rb') as f:
+                            instance = pickle.load(f)
+
+                        region_size = file_name.replace(".pkl", "").split("_")
+                        region = region_size[0]
+                        size = region_size[1]
+
+                        print(f"\n▶️ Running test simulation for {region.title()} ({size})...")
+                        ani, optimizer, visualizer, final_output = run_test_simulation_with_trained_model(
+                            region, size, instance, duration=350.0)
+
+                        depots_count = len(instance['depots'])
+                        drones_count = sum(len(d.drones) for d in instance['depots'])
+                        orders_count = len(instance['orders'])
+
+                        # Save results
+                        txt.write(f"Region: {region}, Size: {size}\n")
+                        txt.write(f"Depots: {depots_count}, Drones: {drones_count}, Orders: {orders_count}\n")
+                        txt.write(f"Result: {final_output}\n")
+                        txt.write("=" * 60 + "\n")
+                        print(f"✅ Finished. Results saved for {region.title()} ({size}).")
         
         else:
             print("Unknown mode. Use: python GNN_ALNS_improved.py [train|simulate|pipeline]")

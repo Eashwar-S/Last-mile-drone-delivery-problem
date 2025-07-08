@@ -1,0 +1,48 @@
+Region: arkansas, Size: small, Order Rate: 0.3
+Depots: 5, Drones: 0, Orders: 150
+Result: Time: 352.0, Completed: 13, Pending: 0, Training samples: 158, Avg Delivery: 6.77
+============================================================
+Region: arkansas, Size: medium, Order Rate: 0.3
+Depots: 10, Drones: 0, Orders: 350
+Result: Time: 352.0, Completed: 25, Pending: 0, Training samples: 356, Avg Delivery: 7.34
+============================================================
+Region: arkansas, Size: large, Order Rate: 0.3
+Depots: 15, Drones: 0, Orders: 600
+Result: Time: 352.0, Completed: 42, Pending: 0, Training samples: 604, Avg Delivery: 8.00
+============================================================
+Region: north_carolina, Size: small, Order Rate: 0.3
+Depots: 5, Drones: 0, Orders: 150
+Result: Time: 352.0, Completed: 17, Pending: 0, Training samples: 162, Avg Delivery: 8.36
+============================================================
+Region: north_carolina, Size: medium, Order Rate: 0.3
+Depots: 10, Drones: 0, Orders: 350
+Result: Time: 352.0, Completed: 31, Pending: 0, Training samples: 361, Avg Delivery: 8.03
+============================================================
+Region: north_carolina, Size: large, Order Rate: 0.3
+Depots: 15, Drones: 0, Orders: 600
+Result: Time: 352.0, Completed: 45, Pending: 0, Training samples: 610, Avg Delivery: 8.27
+============================================================
+Region: utah, Size: small, Order Rate: 0.3
+Depots: 5, Drones: 0, Orders: 150
+Result: Time: 352.0, Completed: 17, Pending: 0, Training samples: 162, Avg Delivery: 7.09
+============================================================
+Region: utah, Size: medium, Order Rate: 0.3
+Depots: 10, Drones: 0, Orders: 350
+Result: Time: 352.0, Completed: 27, Pending: 0, Training samples: 360, Avg Delivery: 7.67
+============================================================
+Region: utah, Size: large, Order Rate: 0.3
+Depots: 15, Drones: 0, Orders: 600
+Result: Time: 352.0, Completed: 43, Pending: 0, Training samples: 607, Avg Delivery: 8.03
+============================================================
+Region: texas, Size: small, Order Rate: 0.3
+Depots: 5, Drones: 0, Orders: 150
+Result: Time: 352.0, Completed: 12, Pending: 0, Training samples: 156, Avg Delivery: 12.74
+============================================================
+Region: texas, Size: medium, Order Rate: 0.3
+Depots: 10, Drones: 0, Orders: 350
+Result: Time: 352.0, Completed: 34, Pending: 0, Training samples: 367, Avg Delivery: 10.96
+============================================================
+Region: texas, Size: large, Order Rate: 0.3
+Depots: 15, Drones: 0, Orders: 600
+Result: Time: 352.0, Completed: 40, Pending: 0, Training samples: 607, Avg Delivery: 10.48
+============================================================

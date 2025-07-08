@@ -1,0 +1,48 @@
+Region: arkansas, Size: large
+Depots: 15, Drones: 30, Orders: 600
+Result: HAD (no training) - Time: 352.0, Completed: 50, Pending: 20, Queue: 0, Avg Delivery: 7.32, Lightning: 611, GNN: 611, ALNS: 0
+============================================================
+Region: arkansas, Size: medium
+Depots: 10, Drones: 20, Orders: 350
+Result: HAD (no training) - Time: 352.0, Completed: 30, Pending: 0, Queue: 0, Avg Delivery: 7.10, Lightning: 361, GNN: 361, ALNS: 0
+============================================================
+Region: arkansas, Size: small
+Depots: 5, Drones: 10, Orders: 150
+Result: HAD (no training) - Time: 352.0, Completed: 15, Pending: 0, Queue: 0, Avg Delivery: 6.60, Lightning: 160, GNN: 160, ALNS: 0
+============================================================
+Region: north, Size: carolina
+Depots: 15, Drones: 30, Orders: 600
+Result: HAD (no training) - Time: 352.0, Completed: 46, Pending: 14, Queue: 0, Avg Delivery: 7.70, Lightning: 611, GNN: 611, ALNS: 0
+============================================================
+Region: north, Size: carolina
+Depots: 10, Drones: 20, Orders: 350
+Result: HAD (no training) - Time: 352.0, Completed: 25, Pending: 0, Queue: 0, Avg Delivery: 7.72, Lightning: 356, GNN: 356, ALNS: 0
+============================================================
+Region: north, Size: carolina
+Depots: 5, Drones: 10, Orders: 150
+Result: HAD (no training) - Time: 352.0, Completed: 15, Pending: 0, Queue: 0, Avg Delivery: 7.22, Lightning: 160, GNN: 160, ALNS: 0
+============================================================
+Region: texas, Size: large
+Depots: 15, Drones: 30, Orders: 600
+Result: HAD (no training) - Time: 352.0, Completed: 44, Pending: 0, Queue: 0, Avg Delivery: 8.92, Lightning: 611, GNN: 611, ALNS: 0
+============================================================
+Region: texas, Size: medium
+Depots: 10, Drones: 20, Orders: 350
+Result: HAD (no training) - Time: 352.0, Completed: 26, Pending: 0, Queue: 0, Avg Delivery: 9.31, Lightning: 359, GNN: 359, ALNS: 0
+============================================================
+Region: texas, Size: small
+Depots: 5, Drones: 10, Orders: 150
+Result: HAD (no training) - Time: 352.0, Completed: 19, Pending: 0, Queue: 0, Avg Delivery: 9.91, Lightning: 163, GNN: 163, ALNS: 0
+============================================================
+Region: utah, Size: large
+Depots: 15, Drones: 30, Orders: 600
+Result: HAD (no training) - Time: 352.0, Completed: 48, Pending: 17, Queue: 0, Avg Delivery: 7.49, Lightning: 611, GNN: 611, ALNS: 0
+============================================================
+Region: utah, Size: medium
+Depots: 10, Drones: 20, Orders: 350
+Result: HAD (no training) - Time: 352.0, Completed: 23, Pending: 0, Queue: 0, Avg Delivery: 7.37, Lightning: 357, GNN: 357, ALNS: 0
+============================================================
+Region: utah, Size: small
+Depots: 5, Drones: 10, Orders: 150
+Result: HAD (no training) - Time: 352.0, Completed: 13, Pending: 0, Queue: 0, Avg Delivery: 6.85, Lightning: 158, GNN: 158, ALNS: 0
+============================================================

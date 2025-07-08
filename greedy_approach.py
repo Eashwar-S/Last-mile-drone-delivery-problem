@@ -11,6 +11,9 @@ import heapq
 import json
 from datetime import datetime, timedelta
 import pickle  # ADDED: For data collection
+import os
+import pickle
+import random
 
 class OrderPriority(Enum):
     LOW = 1
@@ -966,21 +969,178 @@ def run_simulation(region='texas', size='medium', duration=300.0, dt=1.0, order_
     plt.show()
     # return ani, optimizer, visualizer
 
-# Example usage and testing
+
+
+# MODIFIED: Main simulation function with slower animation and data collection
+import matplotlib.pyplot as plt
+from matplotlib import animation
+import random
+
+def run_test_simulation(region, size, instance, duration, dt, order_rate):
+    """Run the complete simulation with data collection and automatic closure."""
+
+    drone_specs = {
+        'speed': 1.5,
+        'battery_capacity': 100.0,
+        'payload_capacity': 10.0
+    }
+
+    optimizer = MultiDepotDroneRoutingOptimizer(instance['depots'], drone_specs)
+    visualizer = DroneRoutingVisualizer(optimizer, instance['bounds'])
+
+    orders = sorted(instance['orders'], key=lambda x: x.arrival_time)
+    order_index = 0
+    final_output = None
+    total_frames = int(duration / dt)
+
+    def animate(frame):
+        nonlocal order_index, final_output
+
+        new_orders = []
+        while (order_index < len(orders) and 
+               orders[order_index].arrival_time <= optimizer.current_time):
+            new_orders.append(orders[order_index])
+            order_index += 1
+
+        if random.random() < order_rate * dt / 10:
+            (min_lon, max_lon), (min_lat, max_lat) = instance['bounds']
+            random_order = Order(
+                id=len(orders) + len(new_orders) + frame * 1000,
+                pickup_location=(random.uniform(min_lon, max_lon), random.uniform(min_lat, max_lat)),
+                delivery_location=(random.uniform(min_lon, max_lon), random.uniform(min_lat, max_lat)),
+                priority=random.choice(list(OrderPriority)),
+                arrival_time=optimizer.current_time,
+                deadline=optimizer.current_time + random.uniform(60, 300)
+            )
+            new_orders.append(random_order)
+
+        optimizer.step(dt, new_orders)
+        visualizer.update_visualization(frame)
+
+        if frame % 20 == 0:
+            metrics = optimizer.metrics
+            print(f"Time: {optimizer.current_time:.1f}, "
+                  f"Completed: {metrics['total_orders_completed']}, "
+                  f"Pending: {len(optimizer.pending_orders)}, "
+                  f"Training samples: {len(optimizer.training_data)}, "
+                  f"Avg Delivery: {metrics['average_delivery_time']:.2f}")
+
+        # Auto-close after final frame
+        if frame == total_frames - 1:
+            optimizer.save_training_data("greedy_training_data.pkl")
+            print("Training data saved after animation completion.")
+            metrics = optimizer.metrics
+            final_output = (f"Time: {optimizer.current_time:.1f}, "
+                            f"Completed: {metrics['total_orders_completed']}, "
+                            f"Pending: {len(optimizer.pending_orders)}, "
+                            f"Training samples: {len(optimizer.training_data)}, "
+                            f"Avg Delivery: {metrics['average_delivery_time']:.2f}")
+            print(final_output)
+            plt.close(visualizer.fig)
+
+    ani = animation.FuncAnimation(visualizer.fig, animate,
+                                  frames=total_frames,
+                                  interval=int(dt * 200),
+                                  repeat=False, blit=False)
+
+    plt.tight_layout()
+    plt.show()
+
+    return final_output
+
+
+
+    
+
+
+
+
+
+# === CONFIGURABLE PARAMETERS ===
+REGIONS = ['arkansas', 'north_carolina', 'utah', 'texas']
+SIZES = ['small', 'medium', 'large']
+CACHE_DIR = "cached_instances"
+
+SIM_DURATION = 350.0  #fixed
+DT = 2.0   # fixed
+ORDER_RATE_RANGE = (0.2, 0.5)  # Random range for testing variability
+
+# === UTILITY FUNCTIONS ===
+def save_instance(instance, filename):
+    with open(filename, 'wb') as f:
+        pickle.dump(instance, f)
+
+def load_instance(filename):
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
+
+def generate_and_save_instance(region, size):
+    instance = RealWorldDataGenerator.generate_instance(region, size)
+    filename = os.path.join(CACHE_DIR, f"{region}_{size}.pkl")
+    save_instance(instance, filename)
+    return instance
+
+def ensure_cache_dir():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+# === MAIN TESTING SCRIPT ===
 if __name__ == "__main__":
-    print("Multi-Depot Dynamic Drone Routing System with Enhanced Visualization and Data Collection")
-    print("=" * 80)
+    print("=== Multi-Depot Drone Routing: Instance Generation, Saving, and Simulation ===\n")
+    ensure_cache_dir()
+
+    results_file = "results_greedy.txt"
+    with open(results_file, "w") as txt:
+        for region in REGIONS:
+            for size in SIZES:
+                print(f"\n▶️ Generating and saving instance for {region.title()} ({size})")
+                instance = generate_and_save_instance(region, size)
+                depots_count = len(instance['depots'])
+                drones_count = sum(len(d.drones) for d in instance['depots'])
+                orders_count = len(instance['orders'])
+
+                print(f"   - Depots: {depots_count}")
+                print(f"   - Drones: {drones_count}")
+                print(f"   - Orders: {orders_count}")
+
+                # Random order rate for this scenario
+                order_rate = 0.3  #round(random.uniform(*ORDER_RATE_RANGE), 2)
+                print(f"   - Order Rate for simulation: {order_rate}")
+
+                # Run simulation and get final output
+                print("   - Starting simulation...")
+                final_output = run_test_simulation(region, size, instance,
+                                                   duration=SIM_DURATION,
+                                                   dt=DT,
+                                                   order_rate=order_rate)
+                # Save result to text file
+                txt.write(f"Region: {region}, Size: {size}, Order Rate: {order_rate}\n")
+                txt.write(f"Depots: {depots_count}, Drones: {drones_count}, Orders: {orders_count}\n")
+                txt.write(f"Result: {final_output}\n")
+                txt.write("=" * 60 + "\n")
+
+    print(f"\n✅ All scenarios tested. Results saved to: {results_file}")
+
+
+
+
+
+
+
+# # Example usage and testing
+# if __name__ == "__main__":
+#     print("Multi-Depot Dynamic Drone Routing System with Enhanced Visualization and Data Collection")
+#     print("=" * 80)
     
-    # Generate and display instance information
-    for region in ['arkansas', 'north_carolina', 'utah', 'texas']:
-        for size in ['small', 'medium', 'large']:
-            instance = RealWorldDataGenerator.generate_instance(region, size)
-            print(f"{region.title()} {size}: "
-                  f"{len(instance['depots'])} depots, "
-                  f"{sum(len(d.drones) for d in instance['depots'])} drones, "
-                  f"{len(instance['orders'])} orders")
+#     # Generate and display instance information
+#     for region in ['arkansas', 'north_carolina', 'utah', 'texas']:
+#         for size in ['small', 'medium', 'large']:
+#             instance = RealWorldDataGenerator.generate_instance(region, size)
+#             print(f"{region.title()} {size}: "
+#                   f"{len(instance['depots'])} depots, "
+#                   f"{sum(len(d.drones) for d in instance['depots'])} drones, "
+#                   f"{len(instance['orders'])} orders")
     
-    print("\nStarting simulation with data collection...")
+#     print("\nStarting simulation with data collection...")
     
-    # MODIFIED: Run simulation with slower animation and data collection
-    run_simulation('texas', 'large', duration=350.0, dt=2.0, order_rate=0.3)
+#     # MODIFIED: Run simulation with slower animation and data collection
+#     run_simulation('texas', 'large', instance, duration=350.0, dt=2.0, order_rate=0.3)
