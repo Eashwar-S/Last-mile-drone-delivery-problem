@@ -1,7 +1,0 @@
-algorithm,size,score_ratio,completion_rate,avg_delivery_time,avg_assignment_ms
-GNN,large,0.282,0.354,6.755,0.315
-GNN,medium,0.479,0.545,4.966,0.191
-GNN,small,0.69,0.753,3.163,0.11
-Greedy,large,0.266,0.333,6.868,0.941
-Greedy,medium,0.497,0.571,4.993,0.73
-Greedy,small,0.691,0.753,3.171,0.273
