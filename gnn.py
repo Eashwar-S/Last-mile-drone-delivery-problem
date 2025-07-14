@@ -422,6 +422,7 @@ class EnhancedGNNDroneRoutingOptimizer:
         self.gnn_predictions = []
         self.cross_depot_decisions = []
         self.future_planning_scores = []
+        self.gnn_cross_depot_decisions = 0
         
         # Initialize drones
         self._initialize_drones()
@@ -459,7 +460,7 @@ class EnhancedGNNDroneRoutingOptimizer:
     def _load_trained_model(self):
         """Load trained advanced GNN model"""
         try:
-            checkpoint = torch.load(self.model_path, map_location='gpu')
+            checkpoint = torch.load(self.model_path, map_location='cpu', weights_only=False)
             
             input_dim = checkpoint.get('input_dim', 32)
             num_depots = checkpoint.get('num_depots', len(self.depots))
@@ -667,12 +668,24 @@ class EnhancedGNNDroneRoutingOptimizer:
                         drone_features = self._extract_drone_features_for_gnn(drone_candidate)
                         depot_features = self._extract_depot_features_for_gnn(drone_candidate)
                         
+                        # # Combine all features
+                        # input_features = np.concatenate([state_base, drone_features, depot_features])
+
                         # Combine all features
+                        print(f"State base shape: {state_base.shape}")
+                        print(f"Drone features shape: {drone_features.shape}")
+                        print(f"Depot features shape: {depot_features.shape}")
                         input_features = np.concatenate([state_base, drone_features, depot_features])
+                        print(f"Combined features shape: {input_features.shape}")
                         
                         if self.scaler is not None:
-                            input_features = self.scaler.transform(input_features.reshape(1, -1))[0]
-                        
+                            print(f"Scaler expects: {self.scaler.mean_.shape[0]} features, got: {input_features.shape[0]}")
+                            # input_features = self.scaler.transform(input_features.reshape(1, -1))[0]
+                            if input_features.shape[0] > self.scaler.mean_.shape[0]:
+                                input_features = input_features[:self.scaler.mean_.shape[0]]
+                            elif input_features.shape[0] < self.scaler.mean_.shape[0]:
+                                input_features = np.pad(input_features, (0, self.scaler.mean_.shape[0] - input_features.shape[0]))
+
                         # Get GNN predictions
                         with torch.no_grad():
                             input_tensor = torch.FloatTensor(input_features).unsqueeze(0)
@@ -697,8 +710,8 @@ class EnhancedGNNDroneRoutingOptimizer:
                         future_bonus = future_value * 2.0
                         
                         # Depot preference bonus
-                        depot_pref_bonus = depot_prefs[min(optimal_depot_id, len(depot_prefs)-1)] * 1.0
-                        
+                        # depot_pref_bonus = depot_prefs[min(optimal_depot_id, len(depot_prefs)-1)] * 1.0
+                        depot_pref_bonus = depot_prefs.max() * 1.0 if len(depot_prefs) > 0 else 0.0
                         # Combined GNN score with cross-depot optimization
                         final_score = (assignment_score * 3.0 +  # Base assignment
                                      cross_depot_bonus +        # Cross-depot operations
@@ -858,14 +871,20 @@ class EnhancedGNNDroneRoutingOptimizer:
             drone_candidate['optimal_end_depot_id'],
         ])
     
+    
     def _extract_depot_features_for_gnn(self, drone_candidate: Dict) -> np.ndarray:
         """Extract depot-specific features for cross-depot optimization"""
-        return np.array([
-            1.0 if drone_candidate['is_cross_depot_operation'] else 0.0,
+        # Ensure consistent feature count with training
+        features = [
+            1.0 if drone_candidate.get('is_cross_depot_operation', False) else 0.0,
             drone_candidate.get('cross_depot_savings', 0) / 1000,
-            drone_candidate['optimal_end_depot_id'],
+            drone_candidate.get('optimal_end_depot_id', drone_candidate['drone_id']),
             drone_candidate.get('depot_load_balance_score', 0),
-        ])
+        ]
+        
+        # Debug print to check feature count
+        print(f"Depot features count: {len(features)}")
+        return np.array(features)
     
     def update_drone_positions(self, dt: float):
         """Update drone positions with cross-depot support"""
@@ -1535,8 +1554,10 @@ class ImprovedDroneRoutingVisualizer:
         self.bounds = bounds
         
         # Setup plot
-        self.fig, ((self.ax_main, self.ax_score), (self.ax_completion, self.ax_advanced)) = plt.subplots(2, 2, figsize=(20, 12))
+        # self.fig, ((self.ax_main, self.ax_score), (self.ax_completion, self.ax_advanced)) = plt.subplots(2, 2, figsize=(20, 12))
         
+        self.fig, ((self.ax_main), (self.ax_completion)) = plt.subplots(1, 2, figsize=(10, 5))
+
         # Main plot setup
         (min_lon, max_lon), (min_lat, max_lat) = bounds
         self.ax_main.set_xlim(min_lon, max_lon)
@@ -1544,12 +1565,12 @@ class ImprovedDroneRoutingVisualizer:
         self.ax_main.set_xlabel('Longitude')
         self.ax_main.set_ylabel('Latitude')
         self.ax_main.set_title('Advanced Cross-Depot GNN Drone Routing System')
-        self.ax_main.grid(True, alpha=0.3)
+        # self.ax_main.grid(True, alpha=0.3)
         
         # Metrics plots setup
-        self.ax_score.set_title('Score Performance')
+        # self.ax_score.set_title('Score Performance')
         self.ax_completion.set_title('Order Completion')
-        self.ax_advanced.set_title('Advanced GNN Metrics')
+        # self.ax_advanced.set_title('Advanced GNN Metrics')
         
         # Color schemes
         self.depot_colors = plt.cm.Set1(np.linspace(0, 1, len(optimizer.depots)))
@@ -1567,6 +1588,7 @@ class ImprovedDroneRoutingVisualizer:
         self.cross_depot_data = []
         self.gnn_cross_depot_data = []
         self.future_planning_data = []
+        
     
     def update_visualization(self, frame):
         """Update visualization with advanced GNN metrics"""
@@ -1585,10 +1607,10 @@ class ImprovedDroneRoutingVisualizer:
         cross_depot_ops = self.optimizer.metrics['cross_depot_operations']
         gnn_cross_depot = self.optimizer.metrics['gnn_cross_depot_decisions']
         
-        model_status = "Advanced GNN" if self.optimizer.model else "Enhanced Heuristic"
+        model_status = "GNN" if self.optimizer.model else "Enhanced Heuristic"
         
-        self.ax_main.set_title(f'{model_status} - t={self.optimizer.current_time:.1f}min - Score: {current_score}/{max_score} ({score_pct:.1f}%) - Cross-Depot: {cross_depot_ops} - GNN CD: {gnn_cross_depot}')
-        self.ax_main.grid(True, alpha=0.3)
+        self.ax_main.set_title(f'{model_status} - t={self.optimizer.current_time:.1f}min - Score: {current_score}/{max_score} ({score_pct:.1f}%)')
+        # self.ax_main.grid(True, alpha=0.3)
         
         # Plot depots with drone counts
         for i, depot in enumerate(self.optimizer.depots):
@@ -1679,36 +1701,75 @@ class ImprovedDroneRoutingVisualizer:
         self.future_planning_data.append(self.optimizer.metrics['future_planning_accuracy'])
         
         # Score plot
-        self.ax_score.clear()
-        self.ax_score.plot(self.time_data, [s * 100 for s in self.score_data], 'g-', linewidth=2, label='Score %')
-        self.ax_score.set_ylabel('Score Percentage')
-        self.ax_score.set_title('Score Performance')
-        self.ax_score.grid(True, alpha=0.3)
-        self.ax_score.legend()
+        # self.ax_score.clear()
+        # self.ax_score.plot(self.time_data, [s * 100 for s in self.score_data], 'g-', linewidth=2, label='Score %')
+        # self.ax_score.set_ylabel('Score Percentage')
+        # self.ax_score.set_title('Score Performance')
+        # self.ax_score.grid(True, alpha=0.3)
+        # self.ax_score.legend()
         
         # Completion plot
         self.ax_completion.clear()
-        self.ax_completion.plot(self.time_data, self.completion_data, 'b-', linewidth=2, label='Completed')
-        self.ax_completion.plot(self.time_data, [len(self.optimizer.failed_orders)] * len(self.time_data), 'r-', linewidth=2, label='Failed')
+        # self.ax_completion.plot(self.time_data, self.completion_data, 'b-', linewidth=2, label='Completed')
+        # self.ax_completion.plot(self.time_data, [len(self.optimizer.failed_orders)] * len(self.time_data), 'r-', linewidth=2, label='Failed')
+        # self.ax_completion.set_ylabel('Order Count')
+        # self.ax_completion.set_xlabel('Time (minutes)')
+        # self.ax_completion.set_title('Order Completion')
+        # # self.ax_completion.grid(True, alpha=0.3)
+        # self.ax_completion.legend()
+        # Data for bar chart
+        categories = ['Total\nCompleted', 'Emergency', 'High', 'Medium', 'Low', 'Failed']
+        counts = [
+            self.optimizer.metrics['total_orders_completed'],
+            self.optimizer.metrics['emergency_completed'],
+            self.optimizer.metrics['high_completed'],
+            self.optimizer.metrics['medium_completed'],
+            self.optimizer.metrics['low_completed'],
+            self.optimizer.metrics['total_orders_failed']
+        ]
+
+        # Colors for each bar
+        colors = ['#2E8B57', '#8B008B', '#FF4500', '#FFA500', '#90EE90', '#DC143C']
+
+        # Create bar chart
+        bars = self.ax_completion.bar(categories, counts, color=colors, alpha=0.8, edgecolor='black', linewidth=1)
+
+        # Add value labels on top of bars
+        for bar, count in zip(bars, counts):
+            height = bar.get_height()
+            if height > 0:  # Only show label if count > 0
+                self.ax_completion.annotate(f'{int(count)}',
+                                        xy=(bar.get_x() + bar.get_width() / 2, height),
+                                        xytext=(0, 3),  # 3 points vertical offset
+                                        textcoords="offset points",
+                                        ha='center', va='bottom',
+                                        fontweight='bold', fontsize=9)
+
         self.ax_completion.set_ylabel('Order Count')
-        self.ax_completion.set_title('Order Completion')
-        self.ax_completion.grid(True, alpha=0.3)
-        self.ax_completion.legend()
+        self.ax_completion.set_title('Order Completion by Priority')
+        # self.ax_completion.grid(True, alpha=0.3, axis='y')
+
+        # Rotate x-axis labels for better readability
+        self.ax_completion.tick_params(axis='x', rotation=0)
+
+        # Set y-axis to start from 0 and add some padding
+        max_count = max(counts) if counts else 1
+        self.ax_completion.set_ylim(0, max_count * 1.1)
         
         # Advanced GNN metrics plot
-        self.ax_advanced.clear()
-        if max(self.cross_depot_data) > 0:
-            self.ax_advanced.plot(self.time_data, self.cross_depot_data, 'purple', linewidth=2, label='Cross-Depot Ops')
-        if max(self.gnn_cross_depot_data) > 0:
-            self.ax_advanced.plot(self.time_data, self.gnn_cross_depot_data, 'orange', linestyle='--', linewidth=2, label='GNN Cross-Depot')
-        if max([x for x in self.future_planning_data if x > 0] or [0]) > 0:
-            self.ax_advanced.plot(self.time_data, [x * 100 for x in self.future_planning_data], 'cyan', linestyle=':', linewidth=2, label='Future Planning %')
+        # self.ax_advanced.clear()
+        # if max(self.cross_depot_data) > 0:
+        #     self.ax_advanced.plot(self.time_data, self.cross_depot_data, 'purple', linewidth=2, label='Cross-Depot Ops')
+        # if max(self.gnn_cross_depot_data) > 0:
+        #     self.ax_advanced.plot(self.time_data, self.gnn_cross_depot_data, 'orange', linestyle='--', linewidth=2, label='GNN Cross-Depot')
+        # if max([x for x in self.future_planning_data if x > 0] or [0]) > 0:
+        #     self.ax_advanced.plot(self.time_data, [x * 100 for x in self.future_planning_data], 'cyan', linestyle=':', linewidth=2, label='Future Planning %')
         
-        self.ax_advanced.set_ylabel('Count / Percentage')
-        self.ax_advanced.set_xlabel('Time (minutes)')
-        self.ax_advanced.set_title('Advanced GNN Metrics')
-        self.ax_advanced.grid(True, alpha=0.3)
-        self.ax_advanced.legend()
+        # self.ax_advanced.set_ylabel('Count / Percentage')
+        # self.ax_advanced.set_xlabel('Time (minutes)')
+        # self.ax_advanced.set_title('Advanced GNN Metrics')
+        # self.ax_advanced.grid(True, alpha=0.3)
+        # self.ax_advanced.legend()
 
 def main():
     """Main function with advanced GNN options"""
@@ -1761,15 +1822,15 @@ def main():
         # Check if trained model exists
         if not os.path.exists('gnn_model.pth'):
             print("Advanced trained model not found! Please run training first:")
-            print("python advanced_gnn.py train")
+            print("python gnn.py train")
             return
         
         # Find a sample instance
         sample_instances = [
-            "instances/texas_medium_0.pkl",
-            "instances/arkansas_medium_0.pkl", 
-            "instances/utah_medium_0.pkl",
-            "instances/north_carolina_medium_0.pkl"
+            "instances/arkansas_large_1.pkl",
+            # "instances/arkansas_medium_0.pkl",
+            # "instances/utah_medium_0.pkl",
+            # "instances/north_carolina_medium_0.pkl"
         ]
         
         sample_file = None
@@ -1780,7 +1841,7 @@ def main():
         
         if sample_file:
             print(f"Running advanced GNN simulation with {sample_file}")
-            optimizer = run_advanced_gnn_simulation(sample_file, dt=0.5, show_animation=True)
+            optimizer = run_advanced_gnn_simulation(sample_file, dt=1, show_animation=True)
         else:
             print("No sample instance found!")
             print("Expected instances in 'instances/' folder")
