@@ -872,8 +872,11 @@ class ImprovedDroneRoutingVisualizer:
         self.bounds = bounds
         
         # Setup plot
-        self.fig, ((self.ax_main, self.ax_score), (self.ax_completion, self.ax_utilization)) = plt.subplots(2, 2, figsize=(20, 12))
+        # self.fig, ((self.ax_main, self.ax_score), (self.ax_completion, self.ax_utilization)) = plt.subplots(2, 2, figsize=(20, 12))
         
+        # Change to 1x2 layout for main plot and metrics
+        self.fig, ((self.ax_main), (self.ax_completion)) = plt.subplots(1, 2, figsize=(10, 5))
+
         # Main plot setup
         (min_lon, max_lon), (min_lat, max_lat) = bounds
         self.ax_main.set_xlim(min_lon, max_lon)
@@ -881,12 +884,12 @@ class ImprovedDroneRoutingVisualizer:
         self.ax_main.set_xlabel('Longitude')
         self.ax_main.set_ylabel('Latitude')
         self.ax_main.set_title('Cross-Depot Enhanced Drone Routing System')
-        self.ax_main.grid(True, alpha=0.3)
+        # self.ax_main.grid(True, alpha=0.3)
         
         # Metrics plots setup
-        self.ax_score.set_title('Score Performance')
+        # self.ax_score.set_title('Score Performance')
         self.ax_completion.set_title('Order Completion')
-        self.ax_utilization.set_title('Drone Utilization & Cross-Depot Ops')
+        # self.ax_utilization.set_title('Drone Utilization & Cross-Depot Ops')
         
         # Color schemes
         self.depot_colors = plt.cm.Set1(np.linspace(0, 1, len(optimizer.depots)))
@@ -920,8 +923,8 @@ class ImprovedDroneRoutingVisualizer:
         score_pct = (current_score / max_score) * 100 if max_score > 0 else 0
         cross_depot_ops = self.optimizer.metrics['cross_depot_operations']
         
-        self.ax_main.set_title(f'Cross-Depot Enhanced Routing - t={self.optimizer.current_time:.1f}min - Score: {current_score}/{max_score} ({score_pct:.1f}%) - Cross-Depot: {cross_depot_ops}')
-        self.ax_main.grid(True, alpha=0.3)
+        self.ax_main.set_title(f'Greedy Routing - t={self.optimizer.current_time:.1f}min - Score: {current_score}/{max_score} ({score_pct:.1f}%)')
+        # self.ax_main.grid(True, alpha=0.3)
         
         # Plot depots
         for i, depot in enumerate(self.optimizer.depots):
@@ -1034,32 +1037,72 @@ class ImprovedDroneRoutingVisualizer:
         self.cross_depot_data.append(self.optimizer.metrics['cross_depot_operations'])  # ADDED
         
         # Score plot
-        self.ax_score.clear()
-        self.ax_score.plot(self.time_data, [s * 100 for s in self.score_data], 'g-', linewidth=2, label='Score %')
-        self.ax_score.set_ylabel('Score Percentage')
-        self.ax_score.set_title('Score Performance')
-        self.ax_score.grid(True, alpha=0.3)
-        self.ax_score.legend()
+        # self.ax_score.clear()
+        # self.ax_score.plot(self.time_data, [s * 100 for s in self.score_data], 'g-', linewidth=2, label='Score %')
+        # self.ax_score.set_ylabel('Score Percentage')
+        # self.ax_score.set_title('Score Performance')
+        # self.ax_score.grid(True, alpha=0.3)
+        # self.ax_score.legend()
         
         # Completion plot
         self.ax_completion.clear()
-        self.ax_completion.plot(self.time_data, self.completion_data, 'b-', linewidth=2, label='Completed')
-        self.ax_completion.plot(self.time_data, [len(self.optimizer.failed_orders)] * len(self.time_data), 'r-', linewidth=2, label='Failed')
+        # self.ax_completion.plot(self.time_data, self.completion_data, 'b-', linewidth=2, label='Completed')
+        # self.ax_completion.plot(self.time_data, [len(self.optimizer.failed_orders)] * len(self.time_data), 'r-', linewidth=2, label='Failed')
+        # self.ax_completion.set_ylabel('Order Count')
+        # self.ax_completion.set_xlabel('Time (minutes)')
+        # self.ax_completion.set_title('Order Completion')
+        # # self.ax_completion.grid(True, alpha=0.3)
+        # self.ax_completion.legend()
+
+        # Data for bar chart
+        categories = ['Total\nCompleted', 'Emergency', 'High', 'Medium', 'Low', 'Failed']
+        counts = [
+            self.optimizer.metrics['total_orders_completed'],
+            self.optimizer.metrics['emergency_completed'],
+            self.optimizer.metrics['high_completed'],
+            self.optimizer.metrics['medium_completed'],
+            self.optimizer.metrics['low_completed'],
+            self.optimizer.metrics['total_orders_failed']
+        ]
+
+        # Colors for each bar
+        colors = ['#2E8B57', '#8B008B', '#FF4500', '#FFA500', '#90EE90', '#DC143C']
+
+        # Create bar chart
+        bars = self.ax_completion.bar(categories, counts, color=colors, alpha=0.8, edgecolor='black', linewidth=1)
+
+        # Add value labels on top of bars
+        for bar, count in zip(bars, counts):
+            height = bar.get_height()
+            if height > 0:  # Only show label if count > 0
+                self.ax_completion.annotate(f'{int(count)}',
+                                        xy=(bar.get_x() + bar.get_width() / 2, height),
+                                        xytext=(0, 3),  # 3 points vertical offset
+                                        textcoords="offset points",
+                                        ha='center', va='bottom',
+                                        fontweight='bold', fontsize=9)
+
         self.ax_completion.set_ylabel('Order Count')
-        self.ax_completion.set_title('Order Completion')
-        self.ax_completion.grid(True, alpha=0.3)
-        self.ax_completion.legend()
+        self.ax_completion.set_title('Order Completion by Priority')
+        # self.ax_completion.grid(True, alpha=0.3, axis='y')
+
+        # Rotate x-axis labels for better readability
+        self.ax_completion.tick_params(axis='x', rotation=0)
+
+        # Set y-axis to start from 0 and add some padding
+        max_count = max(counts) if counts else 1
+        self.ax_completion.set_ylim(0, max_count * 1.1)
         
         # Utilization and Cross-Depot plot
-        self.ax_utilization.clear()
-        self.ax_utilization.plot(self.time_data, [u * 100 for u in self.utilization_data], 'm-', linewidth=2, label='Utilization %')
-        if max(self.cross_depot_data) > 0:
-            self.ax_utilization.plot(self.time_data, self.cross_depot_data, 'orange', linestyle='--', linewidth=2, label='Cross-Depot Ops')
-        self.ax_utilization.set_ylabel('Percentage / Count')
-        self.ax_utilization.set_xlabel('Time (minutes)')
-        self.ax_utilization.set_title('Utilization & Cross-Depot Operations')
-        self.ax_utilization.grid(True, alpha=0.3)
-        self.ax_utilization.legend()
+        # self.ax_utilization.clear()
+        # self.ax_utilization.plot(self.time_data, [u * 100 for u in self.utilization_data], 'm-', linewidth=2, label='Utilization %')
+        # if max(self.cross_depot_data) > 0:
+        #     self.ax_utilization.plot(self.time_data, self.cross_depot_data, 'orange', linestyle='--', linewidth=2, label='Cross-Depot Ops')
+        # self.ax_utilization.set_ylabel('Percentage / Count')
+        # self.ax_utilization.set_xlabel('Time (minutes)')
+        # self.ax_utilization.set_title('Utilization & Cross-Depot Operations')
+        # self.ax_utilization.grid(True, alpha=0.3)
+        # self.ax_utilization.legend()
 
 def run_improved_simulation(instance_file: str, dt: float = 1.0, save_metrics: bool = True, show_animation: bool = True):
     """Run simulation with improved cross-depot optimizer"""
@@ -1270,7 +1313,7 @@ def main():
     print("=" * 80)
     
     # Check for sample instance
-    sample_instance = "instances/arkansas_medium_0.pkl"
+    sample_instance = "instances/arkansas_large_1.pkl"
     
     if os.path.exists(sample_instance):
         print(f"Found sample instance: {sample_instance}")
